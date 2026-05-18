@@ -90,21 +90,29 @@ body {
   border: 3px solid #a3db26;
   background: #fff;
   display: grid;
+  flex: 1;
   place-items: center;
   font-size: 1.2rem;
   overflow: hidden;
+  position: relative;
+  min-height: 0;
+  min-width: 0;
+  width: 100%;
 }
 
 .source-panel {
   display: flex;
   flex-direction: column;
   height: 100%;
+  min-height: 0;
+  min-width: 0;
 }
 
 .source-panel .p-panel-content-container {
   display: flex;
   flex: 1;
   height: calc(100% - var(--preview-panel-header-height));
+  min-height: 0;
   width: 100%;
 }
 
@@ -112,62 +120,116 @@ body {
   display: flex;
   flex: 1;
   height: 100%;
+  min-height: 0;
   width: 100%;
 }
 
 .source-panel .p-panel-content {
   display: flex;
+  flex-direction: column;
   flex: 1;
-  width: 100%;
+  gap: 0.75rem;
+  min-height: 0;
   width: 100%;
 }
 
-.sprite-viewer {
+.source-controls {
   display: grid;
+  gap: 0.35rem;
+}
+
+.source-upload-button {
+  border: 3px solid #171717;
+  background: #fff;
+  padding: 0.65rem;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.source-upload-button:hover {
+  background: #f1f1f1;
+}
+
+.sprite-viewer {
   height: 100%;
+  min-height: 0;
+  min-width: 0;
   width: 100%;
-  gap: 0.75rem;
-  grid-template-rows: minmax(0, 1fr) auto auto;
 }
 
 .sprite-preview-placeholder {
   border: 3px solid #a3db26;
   background: #fff;
   display: grid;
+  flex: 1;
   place-items: center;
   font-size: 1.2rem;
   overflow: hidden;
+  position: relative;
+  min-height: 0;
+  min-width: 0;
 }
 
-.preview-panel {
+.sprite-panel {
   display: flex;
   flex-direction: column;
   height: 100%;
+  min-height: 0;
+  min-width: 0;
 }
 
-.preview-panel .p-panel-content-container {
+.sprite-panel .p-panel-content-container {
   display: flex;
   flex: 1;
   height: calc(100% - var(--preview-panel-header-height));
+  min-height: 0;
   width: 100%;
 }
 
-.preview-panel .p-panel-content-wrapper {
+.sprite-panel .p-panel-content-wrapper {
   display: flex;
   flex: 1;
   height: 100%;
+  min-height: 0;
   width: 100%;
 }
 
-.preview-panel .p-panel-content {
+.sprite-panel .p-panel-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  gap: 0.85rem;
+  min-height: 0;
+  width: 100%;
+}
+
+.sprite-panel-section {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.sprite-preview-section {
   display: flex;
   flex: 1;
-  width: 100%;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
+.section-title {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 700;
 }
 
 .preview-fit-image {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
+  max-width: 100%;
+  max-height: 100%;
   object-fit: contain;
   image-rendering: pixelated;
   display: block;
@@ -182,10 +244,6 @@ body {
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem;
-}
-
-.palette-panel .p-panel-content {
-  padding: 0.35rem;
 }
 
 .palette-item {
@@ -259,6 +317,15 @@ body {
   list-style: none;
   display: grid;
   gap: 0.45rem;
+  overflow-y: auto;
+}
+
+.sprite-image-list:empty::before {
+  content: "No sprites imported";
+  display: block;
+  padding: 0.75rem 0.4rem;
+  color: #666;
+  text-align: center;
 }
 
 .sprite-image-item {
@@ -281,6 +348,67 @@ body {
   image-rendering: pixelated;
   border: 2px solid #171717;
   display: block;
+}
+
+.sprite-context-menu {
+  position: fixed;
+  z-index: 10;
+  min-width: 8rem;
+  border: 2px solid #171717;
+  background: #fff;
+  box-shadow: 3px 3px 0 #171717;
+}
+
+.sprite-context-menu button {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  padding: 0.55rem 0.75rem;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+
+.sprite-context-menu button:hover,
+.sprite-context-menu button:focus {
+  background: #f1f1f1;
+}
+
+.sidebar-actions {
+  display: grid;
+  gap: 0.4rem;
+  margin-top: auto;
+}
+
+.import-button {
+  border: 3px solid #171717;
+  background: #a3db26;
+  padding: 0.75rem;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.import-button:hover {
+  background: #b9ef3c;
+}
+
+.import-error {
+  margin: 0;
+  color: #a00000;
+  font-size: 0.85rem;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 @media (max-width: 1050px) {
