@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import Panel from "primevue/panel";
 import Tab from "primevue/tab";
 import TabList from "primevue/tablist";
@@ -34,6 +34,18 @@ type SpriteContextMenu = {
 type SourceImage = {
   name: string;
   src: string;
+  width: number;
+  height: number;
+};
+
+type PixelPosition = {
+  x: number;
+  y: number;
+};
+
+type SourceImageView = {
+  zoom: number;
+  pan: PixelPosition;
 };
 
 const openedSprites = ref<IndexedSprite[]>([]);
@@ -41,11 +53,27 @@ const selectedSprite = ref<IndexedSprite | null>(null);
 const activeTab = ref("extract-sprite");
 const fileInput = ref<HTMLInputElement | null>(null);
 const sourceFileInput = ref<HTMLInputElement | null>(null);
+const sourcePreviewImage = ref<HTMLImageElement | null>(null);
 const sourceImage = ref<SourceImage | null>(null);
+const sourceImagePixelPosition = ref<PixelPosition | null>(null);
+const sourceImageZoom = ref(1);
+const sourceImagePan = ref<PixelPosition>({ x: 0, y: 0 });
+const isSourceImagePanning = ref(false);
+const sourceImagePanStart = ref<PixelPosition | null>(null);
+const sourceImagePanOrigin = ref<PixelPosition | null>(null);
 const importError = ref("");
 const sourceImportError = ref("");
 const spriteContextMenu = ref<SpriteContextMenu | null>(null);
 let nextSpriteId = 1;
+
+const minSourceImageZoom = 1;
+const maxSourceImageZoom = 32;
+
+const sourceImageTransformStyle = computed(() => ({
+  height: sourceImage.value ? `${sourceImage.value.height * sourceImageZoom.value}px` : undefined,
+  transform: `translate(-50%, -50%) translate(${sourceImagePan.value.x}px, ${sourceImagePan.value.y}px)`,
+  width: sourceImage.value ? `${sourceImage.value.width * sourceImageZoom.value}px` : undefined,
+}));
 
 onMounted(() => {
   window.addEventListener("click", closeSpriteContextMenu);
@@ -116,15 +144,21 @@ async function handleSourceImageUpload(event: Event): Promise<void> {
   const file = input.files?.[0];
 
   sourceImportError.value = "";
+  sourceImagePixelPosition.value = null;
   if (!file) {
     return;
   }
 
   try {
+    const [src, image] = await Promise.all([fileToDataUrl(file), loadImage(file)]);
+
     sourceImage.value = {
       name: file.name,
-      src: await fileToDataUrl(file),
+      src,
+      width: image.naturalWidth,
+      height: image.naturalHeight,
     };
+    resetSourceImageView();
   } catch (error) {
     sourceImportError.value = error instanceof Error ? error.message : "Unable to upload source image.";
   } finally {
@@ -247,6 +281,150 @@ function fileToDataUrl(file: File): Promise<string> {
   });
 }
 
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function handleSourcePreviewWheel(event: WheelEvent): void {
+  if (!sourceImage.value) {
+    return;
+  }
+
+  event.preventDefault();
+
+  const oldZoom = sourceImageZoom.value;
+  const zoomDelta = event.deltaY < 0 ? 1 : -1;
+  const newZoom = clamp(oldZoom + zoomDelta, minSourceImageZoom, maxSourceImageZoom);
+
+  if (newZoom === oldZoom) {
+    return;
+  }
+
+  const previewBounds = (event.currentTarget as HTMLElement).getBoundingClientRect();
+  const pointerFromCenter = {
+    x: event.clientX - previewBounds.left - previewBounds.width / 2,
+    y: event.clientY - previewBounds.top - previewBounds.height / 2,
+  };
+  const zoomRatio = newZoom / oldZoom;
+  const newPan = {
+    x: sourceImagePan.value.x + (1 - zoomRatio) * (pointerFromCenter.x - sourceImagePan.value.x),
+    y: sourceImagePan.value.y + (1 - zoomRatio) * (pointerFromCenter.y - sourceImagePan.value.y),
+  };
+
+  sourceImagePan.value = newPan;
+  sourceImageZoom.value = newZoom;
+  updateSourceImagePixelPosition(event, { zoom: newZoom, pan: newPan });
+}
+
+function startSourceImagePan(event: PointerEvent): void {
+  if (!sourceImage.value || event.button !== 0) {
+    return;
+  }
+
+  event.preventDefault();
+  (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+  isSourceImagePanning.value = true;
+  sourceImagePanStart.value = { x: event.clientX, y: event.clientY };
+  sourceImagePanOrigin.value = { ...sourceImagePan.value };
+  updateSourceImagePixelPosition(event);
+}
+
+function handleSourcePreviewPointerMove(event: PointerEvent): void {
+  let view: SourceImageView | undefined;
+
+  if (isSourceImagePanning.value && sourceImagePanStart.value && sourceImagePanOrigin.value) {
+    const newPan = {
+      x: sourceImagePanOrigin.value.x + event.clientX - sourceImagePanStart.value.x,
+      y: sourceImagePanOrigin.value.y + event.clientY - sourceImagePanStart.value.y,
+    };
+
+    sourceImagePan.value = newPan;
+    view = { zoom: sourceImageZoom.value, pan: newPan };
+  }
+
+  updateSourceImagePixelPosition(event, view);
+}
+
+function endSourceImagePan(event: PointerEvent): void {
+  if ((event.currentTarget as HTMLElement).hasPointerCapture(event.pointerId)) {
+    (event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId);
+  }
+
+  isSourceImagePanning.value = false;
+  sourceImagePanStart.value = null;
+  sourceImagePanOrigin.value = null;
+  updateSourceImagePixelPosition(event);
+}
+
+function handleSourcePreviewPointerLeave(event: PointerEvent): void {
+  if (isSourceImagePanning.value) {
+    updateSourceImagePixelPosition(event);
+    return;
+  }
+
+  clearSourceImagePixelPosition();
+}
+
+function updateSourceImagePixelPosition(event: PointerEvent | WheelEvent, pendingView?: SourceImageView): void {
+  const image = sourcePreviewImage.value;
+
+  if (!image) {
+    sourceImagePixelPosition.value = null;
+    return;
+  }
+
+  const bounds = pendingView
+    ? getSourceImageProjectedBounds(event.currentTarget as HTMLElement, pendingView)
+    : image.getBoundingClientRect();
+  const { naturalWidth, naturalHeight } = image;
+
+  if (naturalWidth === 0 || naturalHeight === 0 || bounds.width === 0 || bounds.height === 0) {
+    sourceImagePixelPosition.value = null;
+    return;
+  }
+
+  const scaleX = bounds.width / naturalWidth;
+  const scaleY = bounds.height / naturalHeight;
+  const localX = event.clientX - bounds.left;
+  const localY = event.clientY - bounds.top;
+
+  if (localX < 0 || localY < 0 || localX >= bounds.width || localY >= bounds.height) {
+    sourceImagePixelPosition.value = null;
+    return;
+  }
+
+  sourceImagePixelPosition.value = {
+    x: clamp(localX / scaleX, 0, naturalWidth),
+    y: clamp(localY / scaleY, 0, naturalHeight),
+  };
+}
+
+function getSourceImageProjectedBounds(previewElement: HTMLElement, view: SourceImageView): DOMRectReadOnly {
+  const previewBounds = previewElement.getBoundingClientRect();
+  const imageWidth = (sourceImage.value?.width ?? 0) * view.zoom;
+  const imageHeight = (sourceImage.value?.height ?? 0) * view.zoom;
+
+  return new DOMRectReadOnly(
+    previewBounds.left + previewBounds.width / 2 - imageWidth / 2 + view.pan.x,
+    previewBounds.top + previewBounds.height / 2 - imageHeight / 2 + view.pan.y,
+    imageWidth,
+    imageHeight,
+  );
+}
+
+function clearSourceImagePixelPosition(): void {
+  sourceImagePixelPosition.value = null;
+}
+
+function resetSourceImageView(): void {
+  sourceImageZoom.value = 1;
+  sourceImagePan.value = { x: 0, y: 0 };
+  isSourceImagePanning.value = false;
+  sourceImagePanStart.value = null;
+  sourceImagePanOrigin.value = null;
+  clearSourceImagePixelPosition();
+}
+
 function openSpriteContextMenu(event: MouseEvent, sprite: IndexedSprite): void {
   selectedSprite.value = sprite;
   spriteContextMenu.value = {
@@ -296,14 +474,33 @@ function removeSprite(sprite: IndexedSprite): void {
           <TabPanel value="extract-sprite">
           <section class="extract-layout">
             <Panel header="Source Image" class="source-panel">
-              <div class="source-image-placeholder">
+              <div
+                class="source-image-placeholder"
+                :class="{
+                  'has-source-image': sourceImage,
+                  'is-panning': isSourceImagePanning,
+                }"
+                @wheel="handleSourcePreviewWheel"
+                @pointerdown="startSourceImagePan"
+                @pointermove="handleSourcePreviewPointerMove"
+                @pointerup="endSourceImagePan"
+                @pointercancel="endSourceImagePan"
+                @pointerleave="handleSourcePreviewPointerLeave"
+              >
                 <img
                   v-if="sourceImage"
+                  ref="sourcePreviewImage"
                   :src="sourceImage.src"
                   :alt="sourceImage.name"
-                  class="preview-fit-image"
+                  class="preview-fit-image source-preview-image"
+                  :style="sourceImageTransformStyle"
+                  draggable="false"
                 />
-                <span v-else>Upload a source image</span>
+                <span v-if="sourceImagePixelPosition" class="source-pixel-position">
+                  X: {{ sourceImagePixelPosition.x.toFixed(2) }}, Y:
+                  {{ sourceImagePixelPosition.y.toFixed(2) }}
+                </span>
+                <span v-if="!sourceImage">Upload a source image</span>
               </div>
               <div class="source-controls">
                 <input

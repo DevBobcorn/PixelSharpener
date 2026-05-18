@@ -100,6 +100,10 @@ body {
   width: 100%;
 }
 
+.source-image-placeholder.has-source-image {
+  touch-action: none;
+}
+
 .source-panel {
   display: flex;
   flex-direction: column;
@@ -131,6 +135,20 @@ body {
   gap: 0.75rem;
   min-height: 0;
   width: 100%;
+}
+
+.source-pixel-position {
+  position: absolute;
+  top: 0.5rem;
+  left: 0.5rem;
+  z-index: 1;
+  border: 2px solid #171717;
+  background: rgba(255, 255, 255, 0.92);
+  padding: 0.25rem 0.4rem;
+  color: #171717;
+  font-size: 0.85rem;
+  font-weight: 700;
+  pointer-events: none;
 }
 
 .source-controls {
@@ -233,6 +251,18 @@ body {
   object-fit: contain;
   image-rendering: pixelated;
   display: block;
+  transform-origin: center;
+  user-select: none;
+  will-change: transform;
+}
+
+.source-preview-image {
+  inset: auto;
+  top: 50%;
+  left: 50%;
+  max-width: none;
+  max-height: none;
+  object-fit: fill;
 }
 
 .palette-items {
