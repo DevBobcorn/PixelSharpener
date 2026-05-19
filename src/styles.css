@@ -86,7 +86,12 @@ body {
 }
 
 .source-image-placeholder.has-source-image {
+  cursor: crosshair;
   touch-action: none;
+}
+
+.source-image-placeholder.is-panning {
+  cursor: grabbing;
 }
 
 .source-panel {
@@ -139,6 +144,46 @@ body {
 .source-controls {
   display: grid;
   gap: 0.35rem;
+}
+
+.source-grid-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.5rem;
+}
+
+.source-merge-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.5rem;
+}
+
+.source-grid-controls label,
+.source-merge-controls label {
+  display: grid;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.source-grid-controls span,
+.source-merge-controls span {
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+
+.source-grid-controls .p-inputnumber,
+.source-grid-controls .p-inputnumber-input,
+.source-merge-controls .p-inputnumber,
+.source-merge-controls .p-inputnumber-input,
+.source-merge-controls .p-select {
+  width: 100%;
+  min-width: 0;
+}
+
+.source-action-buttons {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.5rem;
 }
 
 .sprite-viewer {
@@ -228,13 +273,63 @@ body {
   will-change: transform;
 }
 
-.source-preview-image {
-  inset: auto;
+.sprite-preview-image {
+  display: block;
+  image-rendering: pixelated;
+  user-select: none;
+}
+
+.source-image-transform-layer {
+  position: absolute;
   top: 50%;
   left: 50%;
-  max-width: none;
-  max-height: none;
+  transform-origin: center;
+  user-select: none;
+  will-change: transform;
+}
+
+.source-preview-image {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  image-rendering: pixelated;
   object-fit: fill;
+  pointer-events: none;
+  user-select: none;
+}
+
+.source-selection-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.source-selection-shape {
+  fill: rgba(163, 219, 38, 0.18);
+  stroke: #a3db26;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+.source-selection-grid-line {
+  stroke: rgba(23, 23, 23, 0.72);
+  stroke-width: 1;
+  pointer-events: none;
+}
+
+.source-selection-control-point {
+  cursor: grab;
+  fill: #ffffff;
+  stroke: #171717;
+  stroke-width: 2;
+}
+
+.source-selection-control-point:active {
+  cursor: grabbing;
 }
 
 .palette-items {
@@ -300,15 +395,6 @@ body {
   flex-direction: column;
   gap: 0.7rem;
   background: #f4f4f4;
-}
-
-.sidebar-title {
-  margin: 0;
-  border: 3px solid #171717;
-  padding: 0.75rem;
-  text-align: center;
-  font-size: 1.1rem;
-  background: #fff;
 }
 
 .sprite-image-list {
@@ -377,12 +463,6 @@ body {
 .source-controls .p-button,
 .sidebar-actions .p-button {
   width: 100%;
-}
-
-.import-error {
-  margin: 0;
-  color: #a00000;
-  font-size: 0.85rem;
 }
 
 .visually-hidden {

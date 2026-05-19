@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import InputNumber from "primevue/inputnumber";
 import Panel from "primevue/panel";
 
@@ -10,12 +10,50 @@ const props = defineProps<{
   height: number;
 }>();
 
+const spritePreviewElement = ref<HTMLElement | null>(null);
+const spritePreviewSize = ref({ width: 0, height: 0 });
+let spritePreviewResizeObserver: ResizeObserver | null = null;
+
 const paletteSwatches = computed(() =>
   props.palette.map((color) => ({
     color,
     label: colorToLabel(color),
   })),
 );
+
+const spritePreviewScale = computed(() => {
+  if (props.width <= 0 || props.height <= 0 || spritePreviewSize.value.width <= 0 || spritePreviewSize.value.height <= 0) {
+    return 1;
+  }
+
+  return Math.max(
+    1,
+    Math.floor(Math.min(spritePreviewSize.value.width / props.width, spritePreviewSize.value.height / props.height)),
+  );
+});
+
+const spritePreviewImageStyle = computed(() => ({
+  width: `${props.width * spritePreviewScale.value}px`,
+  height: `${props.height * spritePreviewScale.value}px`,
+}));
+
+onMounted(() => {
+  if (!spritePreviewElement.value) {
+    return;
+  }
+
+  spritePreviewResizeObserver = new ResizeObserver(([entry]) => {
+    spritePreviewSize.value = {
+      width: entry.contentRect.width,
+      height: entry.contentRect.height,
+    };
+  });
+  spritePreviewResizeObserver.observe(spritePreviewElement.value);
+});
+
+onBeforeUnmount(() => {
+  spritePreviewResizeObserver?.disconnect();
+});
 
 function colorToLabel(color: string): string {
   if (!color.startsWith("#") || color.length !== 7) {
@@ -34,8 +72,14 @@ function colorToLabel(color: string): string {
   <section class="sprite-viewer">
     <Panel header="Sprite" class="sprite-panel">
       <section class="sprite-panel-section sprite-preview-section">
-        <div class="sprite-preview-placeholder">
-          <img v-if="previewSrc" :src="previewSrc" alt="Extracted sprite preview" class="preview-fit-image" />
+        <div ref="spritePreviewElement" class="sprite-preview-placeholder">
+          <img
+            v-if="previewSrc"
+            :src="previewSrc"
+            alt="Extracted sprite preview"
+            class="sprite-preview-image"
+            :style="spritePreviewImageStyle"
+          />
           <span v-else>Extracted sprite</span>
         </div>
       </section>
