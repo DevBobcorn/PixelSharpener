@@ -12,15 +12,33 @@ type IndexedPaletteSwatch = PaletteSwatch & {
   tooltip: string;
 };
 
+type HoveredPixel = {
+  x: number;
+  y: number;
+};
+
+type PixelTooltip = {
+  text: string;
+  x: number;
+  y: number;
+  placement: "top" | "bottom";
+};
+
+const transparentPaletteIndex = -1;
+
 const props = defineProps<{
   previewSrc?: string;
   palette: PaletteSwatch[];
+  indexes: number[];
   width: number;
   height: number;
 }>();
 
 const spritePreviewElement = ref<HTMLElement | null>(null);
+const spritePreviewContent = ref<HTMLElement | null>(null);
 const spritePreviewSize = ref({ width: 0, height: 0 });
+const hoveredPixel = ref<HoveredPixel | null>(null);
+const pixelTooltip = ref<PixelTooltip | null>(null);
 let spritePreviewResizeObserver: ResizeObserver | null = null;
 
 const paletteSwatches = computed<IndexedPaletteSwatch[]>(() =>
@@ -46,6 +64,21 @@ const spritePreviewImageStyle = computed(() => ({
   height: `${props.height * spritePreviewScale.value}px`,
 }));
 
+const spritePixelHoverStyle = computed(() => {
+  if (!hoveredPixel.value) {
+    return undefined;
+  }
+
+  const scale = spritePreviewScale.value;
+
+  return {
+    left: `${hoveredPixel.value.x * scale}px`,
+    top: `${hoveredPixel.value.y * scale}px`,
+    width: `${scale}px`,
+    height: `${scale}px`,
+  };
+});
+
 onMounted(() => {
   if (!spritePreviewElement.value) {
     return;
@@ -64,21 +97,95 @@ onBeforeUnmount(() => {
   spritePreviewResizeObserver?.disconnect();
 });
 
+function getPixelTooltipText(paletteIndex: number): string {
+  if (paletteIndex === transparentPaletteIndex) {
+    return `${paletteIndex}: transparent`;
+  }
+
+  const swatch = props.palette[paletteIndex];
+  if (!swatch) {
+    return `${paletteIndex}: unknown`;
+  }
+
+  return `${paletteIndex}: ${swatch.label}`;
+}
+
+function updateHoveredPixel(event: PointerEvent): void {
+  const content = spritePreviewContent.value;
+  if (!content || !props.previewSrc || props.width <= 0 || props.height <= 0) {
+    return;
+  }
+
+  const scale = spritePreviewScale.value;
+  const bounds = content.getBoundingClientRect();
+  const localX = event.clientX - bounds.left;
+  const localY = event.clientY - bounds.top;
+
+  if (localX < 0 || localY < 0 || localX >= bounds.width || localY >= bounds.height) {
+    clearHoveredPixel();
+    return;
+  }
+
+  const pixelX = Math.min(props.width - 1, Math.max(0, Math.floor(localX / scale)));
+  const pixelY = Math.min(props.height - 1, Math.max(0, Math.floor(localY / scale)));
+  const paletteIndex = props.indexes[pixelY * props.width + pixelX] ?? transparentPaletteIndex;
+
+  hoveredPixel.value = { x: pixelX, y: pixelY };
+
+  const margin = 8;
+  const maxTooltipWidth = Math.min(288, window.innerWidth - margin * 2);
+  const pixelCenterX = bounds.left + (pixelX + 0.5) * scale;
+  const pixelCenterY = bounds.top + (pixelY + 0.5) * scale;
+  const placement = pixelCenterY >= 40 ? "top" : "bottom";
+
+  pixelTooltip.value = {
+    text: getPixelTooltipText(paletteIndex),
+    x: clamp(pixelCenterX, margin + maxTooltipWidth / 2, window.innerWidth - margin - maxTooltipWidth / 2),
+    y: placement === "top" ? pixelCenterY - 6 : pixelCenterY + 6,
+    placement,
+  };
+}
+
+function clearHoveredPixel(): void {
+  hoveredPixel.value = null;
+  pixelTooltip.value = null;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
 </script>
 
 <template>
   <section class="sprite-viewer">
     <Panel header="Sprite" class="sprite-panel">
       <section class="sprite-panel-section sprite-preview-section">
-        <div ref="spritePreviewElement" class="sprite-preview-placeholder">
-          <img
+        <div
+          ref="spritePreviewElement"
+          class="sprite-preview-placeholder"
+          @pointerleave="clearHoveredPixel"
+        >
+          <div
             v-if="previewSrc"
-            :src="previewSrc"
-            alt="Extracted sprite preview"
-            class="sprite-preview-image"
-            :style="spritePreviewImageStyle"
-          />
-          <span v-else>Extracted sprite</span>
+            ref="spritePreviewContent"
+            class="sprite-preview-content"
+            @pointermove="updateHoveredPixel"
+          >
+            <img
+              :src="previewSrc"
+              alt="Sprite preview"
+              class="sprite-preview-image"
+              :style="spritePreviewImageStyle"
+              draggable="false"
+            />
+            <span
+              v-if="hoveredPixel"
+              class="sprite-pixel-hover-frame"
+              :style="spritePixelHoverStyle"
+              aria-hidden="true"
+            />
+          </div>
+          <span v-else>Sprite Preview</span>
         </div>
       </section>
 
@@ -107,5 +214,14 @@ onBeforeUnmount(() => {
         </div>
       </section>
     </Panel>
+    <span
+      v-if="pixelTooltip"
+      class="sprite-preview-pixel-tooltip"
+      :class="{ 'is-below': pixelTooltip.placement === 'bottom' }"
+      :style="{ left: `${pixelTooltip.x}px`, top: `${pixelTooltip.y}px` }"
+      role="tooltip"
+    >
+      {{ pixelTooltip.text }}
+    </span>
   </section>
 </template>

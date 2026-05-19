@@ -1877,6 +1877,7 @@ function removeSprite(sprite: IndexedSprite): void {
             <SpriteViewer
               :preview-src="selectedSprite?.src"
               :palette="selectedSprite ? selectedSprite.palette.map((color) => ({ color: colorToCss(color), label: colorToHex(color) })) : []"
+              :indexes="selectedSprite?.indexes ?? []"
               :width="selectedSprite?.width ?? 1"
               :height="selectedSprite?.height ?? 1"
             />
