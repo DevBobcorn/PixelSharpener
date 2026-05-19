@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import Button from "primevue/button";
 import Panel from "primevue/panel";
 import Tab from "primevue/tab";
 import TabList from "primevue/tablist";
@@ -510,9 +511,7 @@ function removeSprite(sprite: IndexedSprite): void {
                   accept="image/*"
                   @change="handleSourceImageUpload"
                 />
-                <button type="button" class="source-upload-button" @click="uploadSourceImage">
-                  Upload Source Image
-                </button>
+                <Button type="button" label="Upload Source Image" @click="uploadSourceImage" />
                 <p v-if="sourceImportError" class="import-error">{{ sourceImportError }}</p>
               </div>
             </Panel>
@@ -560,9 +559,14 @@ function removeSprite(sprite: IndexedSprite): void {
         role="menu"
         @click.stop
       >
-        <button type="button" role="menuitem" @click="removeSprite(spriteContextMenu.sprite)">
-          Remove
-        </button>
+        <Button
+          type="button"
+          role="menuitem"
+          text
+          label="Remove"
+          class="sprite-context-menu-action"
+          @click="removeSprite(spriteContextMenu.sprite)"
+        />
       </div>
       <div class="sidebar-actions">
         <input
@@ -573,9 +577,7 @@ function removeSprite(sprite: IndexedSprite): void {
           multiple
           @change="handleSpriteImport"
         />
-        <button type="button" class="import-button" @click="importSprites">
-          Import
-        </button>
+        <Button type="button" label="Import" @click="importSprites" />
         <p v-if="importError" class="import-error">{{ importError }}</p>
       </div>
     </aside>

@@ -1,5 +1,6 @@
 :root {
   font-family: Arial, Helvetica, sans-serif;
+  --app-panel-header-height: 3rem;
 }
 
 html,
@@ -70,22 +71,6 @@ body {
   min-width: 0;
 }
 
-.p-panel {
-  --preview-panel-header-height: 3.25rem;
-  border: 3px solid #171717;
-}
-
-.p-panel .p-panel-header {
-  min-height: var(--preview-panel-header-height);
-  border-bottom: 3px solid #171717;
-  border-radius: 0;
-  font-weight: 600;
-}
-
-.p-panel .p-panel-content {
-  padding: 1rem;
-}
-
 .source-image-placeholder {
   border: 3px solid #a3db26;
   background: #fff;
@@ -115,7 +100,7 @@ body {
 .source-panel .p-panel-content-container {
   display: flex;
   flex: 1;
-  height: calc(100% - var(--preview-panel-header-height));
+  height: calc(100% - var(--app-panel-header-height));
   min-height: 0;
   width: 100%;
 }
@@ -156,19 +141,6 @@ body {
   gap: 0.35rem;
 }
 
-.source-upload-button {
-  border: 3px solid #171717;
-  background: #fff;
-  padding: 0.65rem;
-  font: inherit;
-  font-weight: 700;
-  cursor: pointer;
-}
-
-.source-upload-button:hover {
-  background: #f1f1f1;
-}
-
 .sprite-viewer {
   height: 100%;
   min-height: 0;
@@ -200,7 +172,7 @@ body {
 .sprite-panel .p-panel-content-container {
   display: flex;
   flex: 1;
-  height: calc(100% - var(--preview-panel-header-height));
+  height: calc(100% - var(--app-panel-header-height));
   min-height: 0;
   width: 100%;
 }
@@ -384,24 +356,16 @@ body {
   position: fixed;
   z-index: 10;
   min-width: 8rem;
-  border: 2px solid #171717;
+  border: 1px solid var(--p-content-border-color);
+  border-radius: var(--p-border-radius-md);
   background: #fff;
-  box-shadow: 3px 3px 0 #171717;
+  box-shadow: var(--p-overlay-shadow);
+  padding: 0.25rem;
 }
 
-.sprite-context-menu button {
+.sprite-context-menu-action {
   width: 100%;
-  border: 0;
-  background: transparent;
-  padding: 0.55rem 0.75rem;
   text-align: left;
-  font: inherit;
-  cursor: pointer;
-}
-
-.sprite-context-menu button:hover,
-.sprite-context-menu button:focus {
-  background: #f1f1f1;
 }
 
 .sidebar-actions {
@@ -410,17 +374,9 @@ body {
   margin-top: auto;
 }
 
-.import-button {
-  border: 3px solid #171717;
-  background: #a3db26;
-  padding: 0.75rem;
-  font: inherit;
-  font-weight: 700;
-  cursor: pointer;
-}
-
-.import-button:hover {
-  background: #b9ef3c;
+.source-controls .p-button,
+.sidebar-actions .p-button {
+  width: 100%;
 }
 
 .import-error {
