@@ -11,6 +11,10 @@ import TabPanels from "primevue/tabpanels";
 import Tabs from "primevue/tabs";
 import Toast from "primevue/toast";
 import { useToast } from "primevue/usetoast";
+import { invoke } from "@tauri-apps/api/core";
+import { save } from "@tauri-apps/plugin-dialog";
+import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import SpriteViewer from "./components/SpriteViewer.vue";
 
 type RgbaColor = {
@@ -23,6 +27,8 @@ type RgbaColor = {
 type IndexedSprite = {
   id: number;
   name: string;
+  sourceAction: "Extracted" | "Imported";
+  sourceFileName: string;
   src: string;
   width: number;
   height: number;
@@ -34,6 +40,13 @@ type SpriteContextMenu = {
   sprite: IndexedSprite;
   x: number;
   y: number;
+};
+
+type SpriteTooltip = {
+  text: string;
+  x: number;
+  y: number;
+  placement: "top" | "bottom";
 };
 
 type SourceImage = {
@@ -75,6 +88,17 @@ type ColorCluster = {
 
 type SourceImagePointerMode = "pan" | "draw-selection" | "drag-selection-point";
 type MergeMethod = "by-distance" | "by-color-count";
+type SpriteContextMenuAction = "sort-palette-by-brightness" | "save" | "remove";
+
+type SpriteContextMenuActionPayload = {
+  action: SpriteContextMenuAction;
+  spriteId: number;
+};
+
+type PngChunk = {
+  type: string;
+  data: Uint8Array;
+};
 
 const openedSprites = ref<IndexedSprite[]>([]);
 const selectedSprite = ref<IndexedSprite | null>(null);
@@ -99,15 +123,29 @@ const sourceGridN = ref<number | null>(16);
 const mergeValue = ref<number | null>(0);
 const mergeMethod = ref<MergeMethod>("by-distance");
 const spriteContextMenu = ref<SpriteContextMenu | null>(null);
+const spriteTooltip = ref<SpriteTooltip | null>(null);
 const toast = useToast();
 let nextSpriteId = 1;
+let unlistenSpriteContextMenuAction: (() => void) | null = null;
+let unlistenDetachedSpriteContextMenuFocusChange: (() => void) | null = null;
 
 const minSourceImageZoom = 1;
 const maxSourceImageZoom = 32;
+const transparentPaletteIndex = -1;
+const spriteContextMenuWindowLabel = "sprite-context-menu";
+const spriteContextMenuWindowWidth = 260;
+const spriteContextMenuWindowHeight = 110;
+const pngSignature = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+const crc32Table = createCrc32Table();
 const mergeMethodOptions: { label: string; value: MergeMethod }[] = [
   { label: "By Distance", value: "by-distance" },
   { label: "By Color Count", value: "by-color-count" },
 ];
+const isDetachedSpriteContextMenu = window.location.hash.startsWith("#sprite-context-menu");
+const detachedSpriteContextMenuSpriteId = Number.parseInt(
+  new URLSearchParams(window.location.hash.split("?")[1] ?? "").get("spriteId") ?? "",
+  10,
+);
 
 const sourceImageTransformStyle = computed(() => ({
   height: sourceImage.value ? `${sourceImage.value.height * sourceImageZoom.value}px` : undefined,
@@ -138,21 +176,36 @@ const sourceSelectionGridLines = computed<SourceSelectionGridLine[]>(() => {
 });
 
 onMounted(() => {
-  window.addEventListener("click", closeSpriteContextMenu);
+  window.addEventListener("contextmenu", preventDefaultContextMenu);
+
+  if (!isDetachedSpriteContextMenu) {
+    window.addEventListener("click", closeSpriteContextMenu);
+    registerSpriteContextMenuActionListener();
+  } else {
+    registerDetachedSpriteContextMenuFocusListener();
+  }
+
   window.addEventListener("keydown", closeSpriteContextMenuOnEscape);
 });
 
 onBeforeUnmount(() => {
+  window.removeEventListener("contextmenu", preventDefaultContextMenu);
   window.removeEventListener("click", closeSpriteContextMenu);
   window.removeEventListener("keydown", closeSpriteContextMenuOnEscape);
+  unlistenSpriteContextMenuAction?.();
+  unlistenDetachedSpriteContextMenuFocusChange?.();
 });
 
 function colorToCss(color: RgbaColor): string {
   if (color.alpha === 255) {
-    return `#${toHex(color.red)}${toHex(color.green)}${toHex(color.blue)}`;
+    return colorToHex(color);
   }
 
   return `rgba(${color.red}, ${color.green}, ${color.blue}, ${(color.alpha / 255).toFixed(3)})`;
+}
+
+function colorToHex(color: RgbaColor): string {
+  return `#${toHex(color.red)}${toHex(color.green)}${toHex(color.blue)}`;
 }
 
 function toHex(value: number): string {
@@ -177,18 +230,220 @@ function renderIndexedSpriteToDataUri(
   const imageData = context.createImageData(width, height);
 
   indexes.forEach((paletteIndex, pixelIndex) => {
-    const color = palette[paletteIndex];
+    const color = paletteIndex === transparentPaletteIndex ? null : palette[paletteIndex];
     const offset = pixelIndex * 4;
 
-    imageData.data[offset] = color.red;
-    imageData.data[offset + 1] = color.green;
-    imageData.data[offset + 2] = color.blue;
-    imageData.data[offset + 3] = color.alpha;
+    imageData.data[offset] = color?.red ?? 0;
+    imageData.data[offset + 1] = color?.green ?? 0;
+    imageData.data[offset + 2] = color?.blue ?? 0;
+    imageData.data[offset + 3] = color?.alpha ?? 0;
   });
 
   context.putImageData(imageData, 0, 0);
 
   return canvas.toDataURL("image/png");
+}
+
+function createIndexedPng(sprite: IndexedSprite): Uint8Array {
+  const hasTransparentPixels = sprite.indexes.includes(transparentPaletteIndex);
+  const exportPalette = [...sprite.palette];
+  let transparentIndex: number | null = null;
+
+  if (hasTransparentPixels) {
+    if (exportPalette.length >= 256) {
+      throw new Error("Indexed PNG export supports up to 255 colors when transparent pixels are present.");
+    }
+
+    transparentIndex = exportPalette.length;
+    exportPalette.push({ red: 0, green: 0, blue: 0, alpha: 0 });
+  }
+
+  if (exportPalette.length === 0) {
+    transparentIndex = 0;
+    exportPalette.push({ red: 0, green: 0, blue: 0, alpha: 0 });
+  }
+
+  if (exportPalette.length > 256) {
+    throw new Error("Indexed PNG export supports up to 256 palette colors.");
+  }
+
+  const indexedPixels = createIndexedPngPixelData(sprite, transparentIndex);
+  const chunks = [
+    pngSignature,
+    createPngChunk("IHDR", createPngHeaderData(sprite.width, sprite.height)),
+    createPngChunk("PLTE", createPngPaletteData(exportPalette)),
+  ];
+
+  if (exportPalette.some((color) => color.alpha !== 255)) {
+    chunks.push(createPngChunk("tRNS", new Uint8Array(exportPalette.map((color) => color.alpha))));
+  }
+
+  chunks.push(createPngChunk("IDAT", zlibStore(indexedPixels)));
+  chunks.push(createPngChunk("IEND", new Uint8Array()));
+
+  return concatUint8Arrays(chunks);
+}
+
+function createIndexedPngPixelData(sprite: IndexedSprite, transparentIndex: number | null): Uint8Array {
+  const rowLength = sprite.width + 1;
+  const data = new Uint8Array(rowLength * sprite.height);
+
+  for (let y = 0; y < sprite.height; y += 1) {
+    const rowOffset = y * rowLength;
+    data[rowOffset] = 0;
+
+    for (let x = 0; x < sprite.width; x += 1) {
+      const spriteIndex = y * sprite.width + x;
+      const paletteIndex = sprite.indexes[spriteIndex];
+
+      if (paletteIndex === transparentPaletteIndex) {
+        if (transparentIndex === null) {
+          throw new Error("Unable to export transparent pixel without a transparent palette entry.");
+        }
+
+        data[rowOffset + x + 1] = transparentIndex;
+        continue;
+      }
+
+      if (paletteIndex < 0 || paletteIndex > 255 || paletteIndex >= sprite.palette.length) {
+        throw new Error("Sprite contains a pixel with an invalid palette index.");
+      }
+
+      data[rowOffset + x + 1] = paletteIndex;
+    }
+  }
+
+  return data;
+}
+
+function createPngHeaderData(width: number, height: number): Uint8Array {
+  const data = new Uint8Array(13);
+  writeUint32(data, 0, width);
+  writeUint32(data, 4, height);
+  data[8] = 8;
+  data[9] = 3;
+  data[10] = 0;
+  data[11] = 0;
+  data[12] = 0;
+
+  return data;
+}
+
+function createPngPaletteData(palette: RgbaColor[]): Uint8Array {
+  const data = new Uint8Array(palette.length * 3);
+
+  palette.forEach((color, index) => {
+    const offset = index * 3;
+    data[offset] = color.red;
+    data[offset + 1] = color.green;
+    data[offset + 2] = color.blue;
+  });
+
+  return data;
+}
+
+function createPngChunk(type: string, data: Uint8Array): Uint8Array {
+  const typeBytes = asciiToBytes(type);
+  const chunk = new Uint8Array(12 + data.length);
+  writeUint32(chunk, 0, data.length);
+  chunk.set(typeBytes, 4);
+  chunk.set(data, 8);
+  writeUint32(chunk, 8 + data.length, crc32(concatUint8Arrays([typeBytes, data])));
+
+  return chunk;
+}
+
+function zlibStore(data: Uint8Array): Uint8Array {
+  const blockCount = Math.max(1, Math.ceil(data.length / 65535));
+  const output = new Uint8Array(2 + blockCount * 5 + data.length + 4);
+  let outputOffset = 0;
+  let dataOffset = 0;
+
+  output[outputOffset++] = 0x78;
+  output[outputOffset++] = 0x01;
+
+  for (let blockIndex = 0; blockIndex < blockCount; blockIndex += 1) {
+    const blockLength = Math.min(65535, data.length - dataOffset);
+    const isFinalBlock = blockIndex === blockCount - 1;
+
+    output[outputOffset++] = isFinalBlock ? 1 : 0;
+    output[outputOffset++] = blockLength & 0xff;
+    output[outputOffset++] = (blockLength >> 8) & 0xff;
+    output[outputOffset++] = (~blockLength) & 0xff;
+    output[outputOffset++] = ((~blockLength) >> 8) & 0xff;
+    output.set(data.subarray(dataOffset, dataOffset + blockLength), outputOffset);
+    outputOffset += blockLength;
+    dataOffset += blockLength;
+  }
+
+  writeUint32(output, outputOffset, adler32(data));
+
+  return output;
+}
+
+function createCrc32Table(): Uint32Array {
+  const table = new Uint32Array(256);
+
+  for (let index = 0; index < table.length; index += 1) {
+    let value = index;
+
+    for (let bit = 0; bit < 8; bit += 1) {
+      value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+    }
+
+    table[index] = value >>> 0;
+  }
+
+  return table;
+}
+
+function crc32(data: Uint8Array): number {
+  let value = 0xffffffff;
+
+  data.forEach((byte) => {
+    value = crc32Table[(value ^ byte) & 0xff] ^ (value >>> 8);
+  });
+
+  return (value ^ 0xffffffff) >>> 0;
+}
+
+function adler32(data: Uint8Array): number {
+  let first = 1;
+  let second = 0;
+
+  data.forEach((byte) => {
+    first = (first + byte) % 65521;
+    second = (second + first) % 65521;
+  });
+
+  return ((second << 16) | first) >>> 0;
+}
+
+function asciiToBytes(value: string): Uint8Array {
+  return Uint8Array.from(value, (character) => character.charCodeAt(0));
+}
+
+function concatUint8Arrays(arrays: Uint8Array[]): Uint8Array {
+  const result = new Uint8Array(arrays.reduce((total, array) => total + array.length, 0));
+  let offset = 0;
+
+  arrays.forEach((array) => {
+    result.set(array, offset);
+    offset += array.length;
+  });
+
+  return result;
+}
+
+function writeUint32(data: Uint8Array, offset: number, value: number): void {
+  data[offset] = (value >>> 24) & 0xff;
+  data[offset + 1] = (value >>> 16) & 0xff;
+  data[offset + 2] = (value >>> 8) & 0xff;
+  data[offset + 3] = value & 0xff;
+}
+
+function readUint32(data: Uint8Array, offset: number): number {
+  return ((data[offset] << 24) | (data[offset + 1] << 16) | (data[offset + 2] << 8) | data[offset + 3]) >>> 0;
 }
 
 function importSprites(): void {
@@ -242,6 +497,7 @@ function extractSpriteFromSource(): void {
   const reducedColors = reduceSpriteColors(sampledColors, mergeMethod.value, mergeValue.value);
   const extractedSprite = createIndexedSpriteFromColors(
     `${sourceImage.value.name.replace(/\.[^.]+$/, "") || "Source"} extract ${nextSpriteId}`,
+    sourceImage.value.name,
     width,
     height,
     reducedColors,
@@ -303,6 +559,11 @@ async function fileToIndexedSprite(file: File): Promise<IndexedSprite> {
     throw new Error(`${file.name} is not an image file.`);
   }
 
+  const indexedPngSprite = await fileToIndexedPngSprite(file);
+  if (indexedPngSprite) {
+    return indexedPngSprite;
+  }
+
   const image = await loadImage(file);
   const canvas = document.createElement("canvas");
   canvas.width = image.naturalWidth;
@@ -331,6 +592,12 @@ async function fileToIndexedSprite(file: File): Promise<IndexedSprite> {
       blue: pixels[offset + 2],
       alpha: pixels[offset + 3],
     };
+
+    if (color.alpha !== 255) {
+      indexes.push(transparentPaletteIndex);
+      continue;
+    }
+
     const key = `${color.red},${color.green},${color.blue},${color.alpha}`;
     let paletteIndex = paletteLookup.get(key);
 
@@ -346,6 +613,8 @@ async function fileToIndexedSprite(file: File): Promise<IndexedSprite> {
   return {
     id: nextSpriteId++,
     name: file.name.replace(/\.[^.]+$/, "") || `Sprite ${nextSpriteId}`,
+    sourceAction: "Imported",
+    sourceFileName: file.name,
     width: canvas.width,
     height: canvas.height,
     palette,
@@ -354,7 +623,224 @@ async function fileToIndexedSprite(file: File): Promise<IndexedSprite> {
   };
 }
 
-function createIndexedSpriteFromColors(name: string, width: number, height: number, colors: RgbaColor[]): IndexedSprite {
+async function fileToIndexedPngSprite(file: File): Promise<IndexedSprite | null> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  if (!isPng(bytes)) {
+    return null;
+  }
+
+  const chunks = parsePngChunks(bytes);
+  const ihdr = chunks.find((chunk) => chunk.type === "IHDR")?.data;
+  const paletteChunk = chunks.find((chunk) => chunk.type === "PLTE")?.data;
+
+  if (!ihdr || !paletteChunk) {
+    return null;
+  }
+
+  const width = readUint32(ihdr, 0);
+  const height = readUint32(ihdr, 4);
+  const bitDepth = ihdr[8];
+  const colorType = ihdr[9];
+  const compressionMethod = ihdr[10];
+  const filterMethod = ihdr[11];
+  const interlaceMethod = ihdr[12];
+
+  if (colorType !== 3) {
+    return null;
+  }
+
+  if (![1, 2, 4, 8].includes(bitDepth)) {
+    throw new Error(`${file.name} uses an unsupported indexed PNG bit depth.`);
+  }
+
+  if (compressionMethod !== 0 || filterMethod !== 0 || interlaceMethod !== 0) {
+    throw new Error(`${file.name} uses unsupported indexed PNG encoding options.`);
+  }
+
+  const sourcePalette = createPaletteFromPngChunks(paletteChunk, chunks.find((chunk) => chunk.type === "tRNS")?.data);
+  const palette: RgbaColor[] = [];
+  const paletteIndexBySourceIndex = new Map<number, number>();
+
+  sourcePalette.forEach((color, sourceIndex) => {
+    if (color.alpha !== 255) {
+      return;
+    }
+
+    paletteIndexBySourceIndex.set(sourceIndex, palette.length);
+    palette.push(color);
+  });
+
+  const compressedData = concatUint8Arrays(chunks.filter((chunk) => chunk.type === "IDAT").map((chunk) => chunk.data));
+  const filteredRows = await inflateZlib(compressedData);
+  const rowByteLength = Math.ceil((width * bitDepth) / 8);
+  const rows = unfilterPngRows(filteredRows, height, rowByteLength);
+  const sourceIndexes = unpackIndexedPngPixels(rows, width, height, bitDepth, rowByteLength);
+  const indexes = sourceIndexes.map((sourceIndex) => paletteIndexBySourceIndex.get(sourceIndex) ?? transparentPaletteIndex);
+
+  return {
+    id: nextSpriteId++,
+    name: file.name.replace(/\.[^.]+$/, "") || `Sprite ${nextSpriteId}`,
+    sourceAction: "Imported",
+    sourceFileName: file.name,
+    width,
+    height,
+    palette,
+    indexes,
+    src: renderIndexedSpriteToDataUri(width, height, palette, indexes),
+  };
+}
+
+function isPng(bytes: Uint8Array): boolean {
+  return pngSignature.every((byte, index) => bytes[index] === byte);
+}
+
+function parsePngChunks(bytes: Uint8Array): PngChunk[] {
+  const chunks: PngChunk[] = [];
+  let offset = pngSignature.length;
+
+  while (offset + 12 <= bytes.length) {
+    const length = readUint32(bytes, offset);
+    const type = String.fromCharCode(...bytes.subarray(offset + 4, offset + 8));
+    const dataStart = offset + 8;
+    const dataEnd = dataStart + length;
+
+    if (dataEnd + 4 > bytes.length) {
+      throw new Error("PNG file is truncated.");
+    }
+
+    chunks.push({ type, data: bytes.slice(dataStart, dataEnd) });
+    offset = dataEnd + 4;
+
+    if (type === "IEND") {
+      break;
+    }
+  }
+
+  return chunks;
+}
+
+function createPaletteFromPngChunks(paletteData: Uint8Array, transparencyData?: Uint8Array): RgbaColor[] {
+  const palette: RgbaColor[] = [];
+
+  for (let offset = 0; offset + 2 < paletteData.length; offset += 3) {
+    const index = offset / 3;
+    palette.push({
+      red: paletteData[offset],
+      green: paletteData[offset + 1],
+      blue: paletteData[offset + 2],
+      alpha: transparencyData?.[index] ?? 255,
+    });
+  }
+
+  return palette;
+}
+
+async function inflateZlib(data: Uint8Array): Promise<Uint8Array> {
+  const dataBuffer = new ArrayBuffer(data.byteLength);
+  new Uint8Array(dataBuffer).set(data);
+
+  const stream = new Blob([dataBuffer]).stream().pipeThrough(new DecompressionStream("deflate"));
+  const buffer = await new Response(stream).arrayBuffer();
+
+  return new Uint8Array(buffer);
+}
+
+function unfilterPngRows(data: Uint8Array, height: number, rowByteLength: number): Uint8Array {
+  const expectedLength = height * (rowByteLength + 1);
+  if (data.length < expectedLength) {
+    throw new Error("Indexed PNG pixel data is truncated.");
+  }
+
+  const rows = new Uint8Array(rowByteLength * height);
+  const bytesPerPixel = 1;
+
+  for (let y = 0; y < height; y += 1) {
+    const sourceRowOffset = y * (rowByteLength + 1);
+    const targetRowOffset = y * rowByteLength;
+    const filterType = data[sourceRowOffset];
+
+    for (let x = 0; x < rowByteLength; x += 1) {
+      const raw = data[sourceRowOffset + x + 1];
+      const left = x >= bytesPerPixel ? rows[targetRowOffset + x - bytesPerPixel] : 0;
+      const up = y > 0 ? rows[targetRowOffset + x - rowByteLength] : 0;
+      const upLeft = y > 0 && x >= bytesPerPixel ? rows[targetRowOffset + x - rowByteLength - bytesPerPixel] : 0;
+
+      rows[targetRowOffset + x] = (raw + getPngFilterPrediction(filterType, left, up, upLeft)) & 0xff;
+    }
+  }
+
+  return rows;
+}
+
+function getPngFilterPrediction(filterType: number, left: number, up: number, upLeft: number): number {
+  if (filterType === 0) {
+    return 0;
+  }
+
+  if (filterType === 1) {
+    return left;
+  }
+
+  if (filterType === 2) {
+    return up;
+  }
+
+  if (filterType === 3) {
+    return Math.floor((left + up) / 2);
+  }
+
+  if (filterType === 4) {
+    return paethPredictor(left, up, upLeft);
+  }
+
+  throw new Error("Indexed PNG uses an unsupported filter type.");
+}
+
+function paethPredictor(left: number, up: number, upLeft: number): number {
+  const prediction = left + up - upLeft;
+  const leftDistance = Math.abs(prediction - left);
+  const upDistance = Math.abs(prediction - up);
+  const upLeftDistance = Math.abs(prediction - upLeft);
+
+  if (leftDistance <= upDistance && leftDistance <= upLeftDistance) {
+    return left;
+  }
+
+  return upDistance <= upLeftDistance ? up : upLeft;
+}
+
+function unpackIndexedPngPixels(
+  rows: Uint8Array,
+  width: number,
+  height: number,
+  bitDepth: number,
+  rowByteLength: number,
+): number[] {
+  const indexes: number[] = [];
+  const pixelsPerByte = 8 / bitDepth;
+  const mask = (1 << bitDepth) - 1;
+
+  for (let y = 0; y < height; y += 1) {
+    const rowOffset = y * rowByteLength;
+
+    for (let x = 0; x < width; x += 1) {
+      const byte = rows[rowOffset + Math.floor(x / pixelsPerByte)];
+      const shift = (pixelsPerByte - 1 - (x % pixelsPerByte)) * bitDepth;
+
+      indexes.push((byte >> shift) & mask);
+    }
+  }
+
+  return indexes;
+}
+
+function createIndexedSpriteFromColors(
+  name: string,
+  sourceFileName: string,
+  width: number,
+  height: number,
+  colors: RgbaColor[],
+): IndexedSprite {
   const palette: RgbaColor[] = [];
   const paletteLookup = new Map<string, number>();
   const indexes: number[] = [];
@@ -375,6 +861,8 @@ function createIndexedSpriteFromColors(name: string, width: number, height: numb
   return {
     id: nextSpriteId++,
     name,
+    sourceAction: "Extracted",
+    sourceFileName,
     width,
     height,
     palette,
@@ -958,8 +1446,14 @@ function resetSourceImageView(): void {
   clearSourceImagePixelPosition();
 }
 
-function openSpriteContextMenu(event: MouseEvent, sprite: IndexedSprite): void {
+async function openSpriteContextMenu(event: MouseEvent, sprite: IndexedSprite): Promise<void> {
   selectedSprite.value = sprite;
+
+  if (isRunningInTauri()) {
+    await openDetachedSpriteContextMenu(event, sprite);
+    return;
+  }
+
   spriteContextMenu.value = {
     sprite,
     x: event.clientX,
@@ -967,14 +1461,233 @@ function openSpriteContextMenu(event: MouseEvent, sprite: IndexedSprite): void {
   };
 }
 
+async function openDetachedSpriteContextMenu(event: MouseEvent, sprite: IndexedSprite): Promise<void> {
+  await closeDetachedSpriteContextMenuWindow();
+  const menuPosition = getDetachedSpriteContextMenuPosition(event);
+
+  const menuWindow = new WebviewWindow(spriteContextMenuWindowLabel, {
+    url: `/#sprite-context-menu?spriteId=${sprite.id}`,
+    title: "Sprite Menu",
+    x: menuPosition.x,
+    y: menuPosition.y,
+    width: spriteContextMenuWindowWidth,
+    height: spriteContextMenuWindowHeight,
+    decorations: false,
+    resizable: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    focus: true,
+  });
+
+  menuWindow.once("tauri://error", () => {
+    spriteContextMenu.value = {
+      sprite,
+      x: event.clientX,
+      y: event.clientY,
+    };
+  });
+}
+
+function getDetachedSpriteContextMenuPosition(event: MouseEvent): PixelPosition {
+  const screenBounds = getAvailableScreenBounds();
+  const margin = 4;
+
+  return {
+    x: clamp(
+      event.screenX,
+      screenBounds.x + margin,
+      screenBounds.x + screenBounds.width - spriteContextMenuWindowWidth - margin,
+    ),
+    y: clamp(
+      event.screenY,
+      screenBounds.y + margin,
+      screenBounds.y + screenBounds.height - spriteContextMenuWindowHeight - margin,
+    ),
+  };
+}
+
+function getAvailableScreenBounds(): { x: number; y: number; width: number; height: number } {
+  const currentScreen = window.screen as Screen & {
+    availLeft?: number;
+    availTop?: number;
+  };
+
+  return {
+    x: currentScreen.availLeft ?? 0,
+    y: currentScreen.availTop ?? 0,
+    width: currentScreen.availWidth,
+    height: currentScreen.availHeight,
+  };
+}
+
+function preventDefaultContextMenu(event: MouseEvent): void {
+  event.preventDefault();
+}
+
+async function closeDetachedSpriteContextMenuWindow(): Promise<void> {
+  if (!isRunningInTauri()) {
+    return;
+  }
+
+  const menuWindow = await WebviewWindow.getByLabel(spriteContextMenuWindowLabel);
+  await menuWindow?.close();
+}
+
+async function registerSpriteContextMenuActionListener(): Promise<void> {
+  if (!isRunningInTauri()) {
+    return;
+  }
+
+  unlistenSpriteContextMenuAction = await getCurrentWindow().listen<SpriteContextMenuActionPayload>(
+    "sprite-context-menu-action",
+    ({ payload }) => {
+      void handleSpriteContextMenuAction(payload);
+    },
+  );
+}
+
+async function registerDetachedSpriteContextMenuFocusListener(): Promise<void> {
+  if (!isRunningInTauri()) {
+    return;
+  }
+
+  unlistenDetachedSpriteContextMenuFocusChange = await getCurrentWindow().onFocusChanged(({ payload: isFocused }) => {
+    if (!isFocused) {
+      void closeCurrentDetachedSpriteContextMenu();
+    }
+  });
+}
+
+async function handleSpriteContextMenuAction(payload: SpriteContextMenuActionPayload): Promise<void> {
+  const sprite = openedSprites.value.find((item) => item.id === payload.spriteId);
+  if (!sprite) {
+    return;
+  }
+
+  if (payload.action === "sort-palette-by-brightness") {
+    sortSpritePaletteByBrightness(sprite);
+    return;
+  }
+
+  if (payload.action === "save") {
+    await saveSpriteAsIndexedPng(sprite);
+    return;
+  }
+
+  removeSprite(sprite);
+}
+
 function closeSpriteContextMenu(): void {
   spriteContextMenu.value = null;
+  void closeDetachedSpriteContextMenuWindow();
 }
 
 function closeSpriteContextMenuOnEscape(event: KeyboardEvent): void {
   if (event.key === "Escape") {
+    if (isDetachedSpriteContextMenu) {
+      void closeCurrentDetachedSpriteContextMenu();
+      return;
+    }
+
     closeSpriteContextMenu();
   }
+}
+
+async function closeCurrentDetachedSpriteContextMenu(): Promise<void> {
+  if (!isRunningInTauri()) {
+    return;
+  }
+
+  await getCurrentWindow().close();
+}
+
+async function sendDetachedSpriteContextMenuAction(action: SpriteContextMenuAction): Promise<void> {
+  if (!Number.isFinite(detachedSpriteContextMenuSpriteId) || !isRunningInTauri()) {
+    return;
+  }
+
+  await getCurrentWindow().emitTo("main", "sprite-context-menu-action", {
+    action,
+    spriteId: detachedSpriteContextMenuSpriteId,
+  });
+  await closeCurrentDetachedSpriteContextMenu();
+}
+
+async function saveSpriteAsIndexedPng(sprite: IndexedSprite): Promise<void> {
+  try {
+    const png = createIndexedPng(sprite);
+
+    if (isRunningInTauri()) {
+      const path = await save({
+        title: "Save Sprite",
+        defaultPath: `${sanitizeFileName(sprite.name) || "sprite"}.png`,
+        filters: [{ name: "PNG Image", extensions: ["png"] }],
+      });
+
+      if (!path) {
+        return;
+      }
+
+      await invoke("save_file", { path, bytes: Array.from(png) });
+      closeSpriteContextMenu();
+      return;
+    }
+
+    downloadSpritePng(sprite, png);
+    closeSpriteContextMenu();
+  } catch (error) {
+    showErrorToast("Save failed", error instanceof Error ? error.message : "Unable to save sprite.");
+  }
+}
+
+function downloadSpritePng(sprite: IndexedSprite, png: Uint8Array): void {
+  const pngBuffer = new ArrayBuffer(png.byteLength);
+  const link = document.createElement("a");
+
+  new Uint8Array(pngBuffer).set(png);
+
+  const url = URL.createObjectURL(new Blob([pngBuffer], { type: "image/png" }));
+  link.href = url;
+  link.download = `${sanitizeFileName(sprite.name) || "sprite"}.png`;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+function sanitizeFileName(name: string): string {
+  return name.replace(/[<>:"/\\|?*\u0000-\u001F]/g, "_").trim();
+}
+
+function getSpriteTooltip(sprite: IndexedSprite): string {
+  return `${sprite.id}: ${sprite.sourceAction} from ${sprite.sourceFileName}`;
+}
+
+function showSpriteTooltip(event: MouseEvent | FocusEvent, sprite: IndexedSprite): void {
+  const element = event.currentTarget;
+  if (!(element instanceof HTMLElement)) {
+    return;
+  }
+
+  const margin = 8;
+  const maxTooltipWidth = Math.min(288, window.innerWidth - margin * 2);
+  const bounds = element.getBoundingClientRect();
+  const placement = bounds.top >= 40 ? "top" : "bottom";
+
+  spriteTooltip.value = {
+    text: getSpriteTooltip(sprite),
+    x: clamp(bounds.left + bounds.width / 2, margin + maxTooltipWidth / 2, window.innerWidth - margin - maxTooltipWidth / 2),
+    y: placement === "top" ? bounds.top - 6 : bounds.bottom + 6,
+    placement,
+  };
+}
+
+function hideSpriteTooltip(): void {
+  spriteTooltip.value = null;
+}
+
+function isRunningInTauri(): boolean {
+  return "__TAURI_INTERNALS__" in window;
 }
 
 function sortSpritePaletteByBrightness(sprite: IndexedSprite): void {
@@ -1022,7 +1735,30 @@ function removeSprite(sprite: IndexedSprite): void {
 
 <template>
   <Toast />
-  <main class="app-shell">
+  <main v-if="isDetachedSpriteContextMenu" class="detached-sprite-context-menu" @contextmenu.prevent>
+    <Button
+      type="button"
+      text
+      label="Sort Palette by Brightness"
+      class="sprite-context-menu-action"
+      @click="sendDetachedSpriteContextMenuAction('sort-palette-by-brightness')"
+    />
+    <Button
+      type="button"
+      text
+      label="Save"
+      class="sprite-context-menu-action"
+      @click="sendDetachedSpriteContextMenuAction('save')"
+    />
+    <Button
+      type="button"
+      text
+      label="Remove"
+      class="sprite-context-menu-action"
+      @click="sendDetachedSpriteContextMenuAction('remove')"
+    />
+  </main>
+  <main v-else class="app-shell">
     <section class="main-panel">
       <Tabs v-model:value="activeTab" class="main-tabs">
         <TabList>
@@ -1140,7 +1876,7 @@ function removeSprite(sprite: IndexedSprite): void {
 
             <SpriteViewer
               :preview-src="selectedSprite?.src"
-              :palette="selectedSprite ? selectedSprite.palette.map(colorToCss) : []"
+              :palette="selectedSprite ? selectedSprite.palette.map((color) => ({ color: colorToCss(color), label: colorToHex(color) })) : []"
               :width="selectedSprite?.width ?? 1"
               :height="selectedSprite?.height ?? 1"
             />
@@ -1159,15 +1895,19 @@ function removeSprite(sprite: IndexedSprite): void {
     </section>
 
     <aside class="right-sidebar">
-      <ul class="sprite-image-list">
+      <ul class="sprite-image-list" @scroll="hideSpriteTooltip">
         <li v-for="sprite in openedSprites" :key="sprite.id">
           <button
             type="button"
             class="sprite-image-item"
             :class="{ 'is-active': selectedSprite?.id === sprite.id }"
             @click="selectedSprite = sprite"
+            @mouseenter="showSpriteTooltip($event, sprite)"
+            @mouseleave="hideSpriteTooltip"
+            @focus="showSpriteTooltip($event, sprite)"
+            @blur="hideSpriteTooltip"
             @contextmenu.prevent="openSpriteContextMenu($event, sprite)"
-            :aria-label="`Open ${sprite.name}`"
+            :aria-label="`Open ${sprite.name}. ${getSpriteTooltip(sprite)}`"
           >
             <img :src="sprite.src" :alt="sprite.name" class="sprite-thumb" />
           </button>
@@ -1184,9 +1924,17 @@ function removeSprite(sprite: IndexedSprite): void {
           type="button"
           role="menuitem"
           text
-          label="Sort Palette By Brightness"
+          label="Sort Palette by Brightness"
           class="sprite-context-menu-action"
           @click="sortSpritePaletteByBrightness(spriteContextMenu.sprite)"
+        />
+        <Button
+          type="button"
+          role="menuitem"
+          text
+          label="Save"
+          class="sprite-context-menu-action"
+          @click="saveSpriteAsIndexedPng(spriteContextMenu.sprite)"
         />
         <Button
           type="button"
@@ -1209,5 +1957,14 @@ function removeSprite(sprite: IndexedSprite): void {
         <Button type="button" label="Import" @click="importSprites" />
       </div>
     </aside>
+    <span
+      v-if="spriteTooltip"
+      class="sprite-image-tooltip"
+      :class="{ 'is-below': spriteTooltip.placement === 'bottom' }"
+      :style="{ left: `${spriteTooltip.x}px`, top: `${spriteTooltip.y}px` }"
+      role="tooltip"
+    >
+      {{ spriteTooltip.text }}
+    </span>
   </main>
 </template>

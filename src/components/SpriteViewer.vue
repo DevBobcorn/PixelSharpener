@@ -3,9 +3,18 @@ import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import InputNumber from "primevue/inputnumber";
 import Panel from "primevue/panel";
 
+type PaletteSwatch = {
+  color: string;
+  label: string;
+};
+
+type IndexedPaletteSwatch = PaletteSwatch & {
+  tooltip: string;
+};
+
 const props = defineProps<{
   previewSrc?: string;
-  palette: string[];
+  palette: PaletteSwatch[];
   width: number;
   height: number;
 }>();
@@ -14,10 +23,10 @@ const spritePreviewElement = ref<HTMLElement | null>(null);
 const spritePreviewSize = ref({ width: 0, height: 0 });
 let spritePreviewResizeObserver: ResizeObserver | null = null;
 
-const paletteSwatches = computed(() =>
-  props.palette.map((color) => ({
-    color,
-    label: colorToLabel(color),
+const paletteSwatches = computed<IndexedPaletteSwatch[]>(() =>
+  props.palette.map((color, index) => ({
+    ...color,
+    tooltip: `${index}: ${color.label}`,
   })),
 );
 
@@ -55,17 +64,6 @@ onBeforeUnmount(() => {
   spritePreviewResizeObserver?.disconnect();
 });
 
-function colorToLabel(color: string): string {
-  if (!color.startsWith("#") || color.length !== 7) {
-    return color;
-  }
-
-  const red = Number.parseInt(color.slice(1, 3), 16);
-  const green = Number.parseInt(color.slice(3, 5), 16);
-  const blue = Number.parseInt(color.slice(5, 7), 16);
-
-  return `rgb(${red}, ${green}, ${blue})`;
-}
 </script>
 
 <template>
@@ -85,21 +83,18 @@ function colorToLabel(color: string): string {
       </section>
 
       <section class="sprite-panel-section" aria-labelledby="sprite-palette-heading">
-        <h3 id="sprite-palette-heading" class="section-title">Palette List</h3>
+        <h3 id="sprite-palette-heading" class="section-title">Palette List ({{ paletteSwatches.length }})</h3>
         <ul class="palette-items">
           <li v-for="(color, index) in paletteSwatches" :key="`${color.color}-${index}`" class="palette-item">
-            <span
-              class="palette-swatch"
-              :style="{ backgroundColor: color.color }"
-              :title="color.label"
-              :aria-label="color.label"
-            />
+            <span class="palette-swatch-wrapper">
+              <span class="palette-swatch" :style="{ backgroundColor: color.color }" :aria-label="color.tooltip" />
+              <span class="palette-swatch-tooltip" role="tooltip">{{ color.tooltip }}</span>
+            </span>
           </li>
         </ul>
       </section>
 
-      <section class="sprite-panel-section" aria-labelledby="sprite-size-heading">
-        <h3 id="sprite-size-heading" class="section-title">Size</h3>
+      <section class="sprite-panel-section">
         <div class="size-fields">
           <label>
             <span>Width</span>

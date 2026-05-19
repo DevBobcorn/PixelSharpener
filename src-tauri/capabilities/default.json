@@ -2,9 +2,14 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capability for the main window",
-  "windows": ["main"],
+  "windows": ["main", "sprite-context-menu"],
   "permissions": [
     "core:default",
+    "core:event:allow-emit-to",
+    "core:window:allow-close",
+    "core:webview:default",
+    "core:webview:allow-create-webview-window",
+    "dialog:allow-save",
     "opener:default"
   ]
 }

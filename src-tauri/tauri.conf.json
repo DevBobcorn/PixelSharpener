@@ -13,9 +13,9 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "pixelsharpener",
-        "width": 800,
-        "height": 600
+        "title": "PixelSharpener",
+        "width": 1600,
+        "height": 900
       }
     ],
     "security": {
