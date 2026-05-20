@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import Button from "primevue/button";
 import InputNumber from "primevue/inputnumber";
 import Panel from "primevue/panel";
@@ -27,7 +27,7 @@ type RgbaColor = {
 type IndexedSprite = {
   id: number;
   name: string;
-  sourceAction: "Extracted" | "Imported";
+  sourceAction: "Extracted" | "Imported" | "Remapped";
   sourceFileName: string;
   src: string;
   width: number;
@@ -77,6 +77,12 @@ type UniqueColor = {
   count: number;
 };
 
+type PaletteRemapRow = {
+  index: number;
+  sourceColor: RgbaColor;
+  targetColor: RgbaColor;
+};
+
 type ColorCluster = {
   active: boolean;
   color: RgbaColor;
@@ -88,7 +94,7 @@ type ColorCluster = {
 
 type SourceImagePointerMode = "pan" | "draw-selection" | "drag-selection-point";
 type MergeMethod = "by-distance" | "by-color-count";
-type SpriteContextMenuAction = "sort-palette-by-brightness" | "save" | "remove";
+type SpriteContextMenuAction = "sort-palette-by-brightness" | "save" | "save-palette" | "remove";
 
 type SpriteContextMenuActionPayload = {
   action: SpriteContextMenuAction;
@@ -105,6 +111,7 @@ const selectedSprite = ref<IndexedSprite | null>(null);
 const activeTab = ref("extract-sprite");
 const fileInput = ref<HTMLInputElement | null>(null);
 const sourceFileInput = ref<HTMLInputElement | null>(null);
+const paletteFileInput = ref<HTMLInputElement | null>(null);
 const sourcePreviewElement = ref<HTMLElement | null>(null);
 const sourcePreviewImage = ref<HTMLImageElement | null>(null);
 const sourceImage = ref<SourceImage | null>(null);
@@ -121,6 +128,9 @@ const sourceSelectionActivePointIndex = ref<number | null>(null);
 const sourceGridM = ref<number | null>(16);
 const sourceGridN = ref<number | null>(16);
 const mergeValue = ref<number | null>(0);
+const paletteRemapTargets = ref<RgbaColor[]>([]);
+const dedupeRemappedColors = ref(true);
+const showRemapPreview = ref(false);
 const mergeMethod = ref<MergeMethod>("by-distance");
 const spriteContextMenu = ref<SpriteContextMenu | null>(null);
 const spriteTooltip = ref<SpriteTooltip | null>(null);
@@ -134,7 +144,7 @@ const maxSourceImageZoom = 32;
 const transparentPaletteIndex = -1;
 const spriteContextMenuWindowLabel = "sprite-context-menu";
 const spriteContextMenuWindowWidth = 260;
-const spriteContextMenuWindowHeight = 110;
+const spriteContextMenuWindowHeight = 145;
 const pngSignature = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
 const crc32Table = createCrc32Table();
 const mergeMethodOptions: { label: string; value: MergeMethod }[] = [
@@ -156,6 +166,59 @@ const sourceImageTransformStyle = computed(() => ({
 const sourceSelectionPolygonPoints = computed(() => sourceSelection.value?.map(({ x, y }) => `${x},${y}`).join(" ") ?? "");
 const sourceSelectionControlPointRadius = computed(() => 6 / sourceImageZoom.value);
 const mergeValueLabel = computed(() => (mergeMethod.value === "by-distance" ? "Distance" : "Color Count"));
+const paletteRemapRows = computed<PaletteRemapRow[]>(() => {
+  const sprite = selectedSprite.value;
+  if (!sprite) {
+    return [];
+  }
+
+  return sprite.palette.map((sourceColor, index) => ({
+    index,
+    sourceColor,
+    targetColor: paletteRemapTargets.value[index] ?? sourceColor,
+  }));
+});
+const canApplyPaletteRemap = computed(() => {
+  const sprite = selectedSprite.value;
+  return Boolean(sprite && paletteRemapTargets.value.length === sprite.palette.length);
+});
+const updatePalettePreview = computed<{
+  src?: string;
+  palette: RgbaColor[];
+  indexes: number[];
+  width: number;
+  height: number;
+}>(() => {
+  const sprite = selectedSprite.value;
+  if (!sprite) {
+    return {
+      src: undefined,
+      palette: [],
+      indexes: [],
+      width: 1,
+      height: 1,
+    };
+  }
+
+  if (!showRemapPreview.value || !canApplyPaletteRemap.value) {
+    return {
+      src: sprite.src,
+      palette: sprite.palette,
+      indexes: sprite.indexes,
+      width: sprite.width,
+      height: sprite.height,
+    };
+  }
+
+  const { palette, indexes } = remapSpritePalette(sprite, paletteRemapTargets.value, dedupeRemappedColors.value);
+  return {
+    src: renderIndexedSpriteToDataUri(sprite.width, sprite.height, palette, indexes),
+    palette,
+    indexes,
+    width: sprite.width,
+    height: sprite.height,
+  };
+});
 const sourceSelectionGridLines = computed<SourceSelectionGridLine[]>(() => {
   if (!sourceSelection.value || sourceSelection.value.length !== 4) {
     return [];
@@ -195,6 +258,14 @@ onBeforeUnmount(() => {
   unlistenSpriteContextMenuAction?.();
   unlistenDetachedSpriteContextMenuFocusChange?.();
 });
+
+watch(
+  () => (selectedSprite.value ? `${selectedSprite.value.id}:${selectedSprite.value.palette.map(colorToKey).join("|")}` : ""),
+  () => {
+    syncPaletteRemapTargets(selectedSprite.value);
+  },
+  { immediate: true },
+);
 
 function colorToCss(color: RgbaColor): string {
   if (color.alpha === 255) {
@@ -472,6 +543,222 @@ function showErrorToast(summary: string, detail: string): void {
     detail,
     life: 4000,
   });
+}
+
+function cloneColor(color: RgbaColor): RgbaColor {
+  return {
+    red: color.red,
+    green: color.green,
+    blue: color.blue,
+    alpha: color.alpha,
+  };
+}
+
+function syncPaletteRemapTargets(sprite: IndexedSprite | null): void {
+  paletteRemapTargets.value = sprite ? sprite.palette.map(cloneColor) : [];
+}
+
+function handleRemapColorInput(index: number, event: Event): void {
+  const input = event.target as HTMLInputElement | null;
+  if (!input) {
+    return;
+  }
+
+  updateRemapTargetColor(index, input.value);
+}
+
+function updateRemapTargetColor(index: number, value: string): void {
+  const rgb = hexToRgb(value);
+  const target = paletteRemapTargets.value[index];
+  if (!rgb || !target) {
+    return;
+  }
+
+  target.red = rgb.red;
+  target.green = rgb.green;
+  target.blue = rgb.blue;
+}
+
+function hexToRgb(value: string): Pick<RgbaColor, "red" | "green" | "blue"> | null {
+  const hex = value.trim().replace(/^#/, "");
+  if (!/^[0-9a-f]{6}$/i.test(hex)) {
+    return null;
+  }
+
+  return {
+    red: Number.parseInt(hex.slice(0, 2), 16),
+    green: Number.parseInt(hex.slice(2, 4), 16),
+    blue: Number.parseInt(hex.slice(4, 6), 16),
+  };
+}
+
+function remapSelectedSpritePalette(): void {
+  const sprite = selectedSprite.value;
+  if (!sprite || !canApplyPaletteRemap.value) {
+    showWarningToast("Sprite required", "Select a sprite before remapping its palette.");
+    return;
+  }
+
+  applyPaletteRemapToSprite(sprite, paletteRemapTargets.value);
+  syncPaletteRemapTargets(sprite);
+}
+
+function remapSelectedSpritePaletteToNew(): void {
+  const sprite = selectedSprite.value;
+  if (!sprite || !canApplyPaletteRemap.value) {
+    showWarningToast("Sprite required", "Select a sprite before creating a remapped copy.");
+    return;
+  }
+
+  const remappedSprite = createRemappedSprite(sprite, paletteRemapTargets.value);
+  openedSprites.value.push(remappedSprite);
+  selectedSprite.value = remappedSprite;
+}
+
+function loadPaletteImageForRemap(): void {
+  const sprite = selectedSprite.value;
+  if (!sprite) {
+    showWarningToast("Sprite required", "Select a sprite before loading remap colors.");
+    return;
+  }
+
+  paletteFileInput.value?.click();
+}
+
+async function handlePaletteImageUpload(event: Event): Promise<void> {
+  const sprite = selectedSprite.value;
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+
+  if (!sprite || !file) {
+    input.value = "";
+    return;
+  }
+
+  try {
+    const loadedColors = await extractPaletteColorsFromImage(file);
+    const expectedCount = sprite.palette.length;
+    const usableCount = Math.min(expectedCount, loadedColors.length);
+
+    if (loadedColors.length !== expectedCount) {
+      showWarningToast(
+        "Palette size mismatch",
+        `Loaded ${loadedColors.length} colors, expected ${expectedCount}. Extra colors are discarded and missing colors are unchanged.`,
+      );
+    }
+
+    for (let index = 0; index < usableCount; index += 1) {
+      const loadedColor = loadedColors[index];
+      const target = paletteRemapTargets.value[index];
+      if (!target) {
+        continue;
+      }
+
+      target.red = loadedColor.red;
+      target.green = loadedColor.green;
+      target.blue = loadedColor.blue;
+    }
+  } catch (error) {
+    showErrorToast("Load failed", error instanceof Error ? error.message : "Unable to load palette image.");
+  } finally {
+    input.value = "";
+  }
+}
+
+async function extractPaletteColorsFromImage(file: File): Promise<RgbaColor[]> {
+  if (!file.type.startsWith("image/")) {
+    throw new Error(`${file.name} is not an image file.`);
+  }
+
+  const image = await loadImage(file);
+  const canvas = document.createElement("canvas");
+  canvas.width = image.naturalWidth;
+  canvas.height = image.naturalHeight;
+
+  if (canvas.width === 0 || canvas.height === 0) {
+    throw new Error(`${file.name} does not contain readable image dimensions.`);
+  }
+
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) {
+    throw new Error("Unable to read palette image pixels.");
+  }
+
+  context.drawImage(image, 0, 0);
+  const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+  const colors: RgbaColor[] = [];
+
+  for (let offset = 0; offset < pixels.length; offset += 4) {
+    colors.push({
+      red: pixels[offset],
+      green: pixels[offset + 1],
+      blue: pixels[offset + 2],
+      alpha: 255,
+    });
+  }
+
+  return colors;
+}
+
+function createRemappedSprite(sprite: IndexedSprite, targets: RgbaColor[]): IndexedSprite {
+  const { palette, indexes } = remapSpritePalette(sprite, targets, dedupeRemappedColors.value);
+
+  return {
+    ...sprite,
+    id: nextSpriteId++,
+    name: `${sprite.name} remap`,
+    sourceAction: "Remapped",
+    palette,
+    indexes,
+    src: renderIndexedSpriteToDataUri(sprite.width, sprite.height, palette, indexes),
+  };
+}
+
+function applyPaletteRemapToSprite(sprite: IndexedSprite, targets: RgbaColor[]): void {
+  const { palette, indexes } = remapSpritePalette(sprite, targets, dedupeRemappedColors.value);
+  sprite.palette = palette;
+  sprite.indexes = indexes;
+  sprite.src = renderIndexedSpriteToDataUri(sprite.width, sprite.height, palette, indexes);
+}
+
+function remapSpritePalette(
+  sprite: IndexedSprite,
+  targets: RgbaColor[],
+  shouldDedupe: boolean,
+): { palette: RgbaColor[]; indexes: number[] } {
+  if (!shouldDedupe) {
+    return {
+      palette: sprite.palette.map((sourceColor, sourceIndex) => cloneColor(targets[sourceIndex] ?? sourceColor)),
+      indexes: [...sprite.indexes],
+    };
+  }
+
+  const remappedPalette: RgbaColor[] = [];
+  const remappedPaletteLookup = new Map<string, number>();
+  const remappedIndexByOriginal = new Map<number, number>();
+
+  sprite.palette.forEach((sourceColor, sourceIndex) => {
+    const remappedColor = cloneColor(targets[sourceIndex] ?? sourceColor);
+    const key = colorToKey(remappedColor);
+    let remappedIndex = remappedPaletteLookup.get(key);
+
+    if (remappedIndex === undefined) {
+      remappedIndex = remappedPalette.length;
+      remappedPaletteLookup.set(key, remappedIndex);
+      remappedPalette.push(remappedColor);
+    }
+
+    remappedIndexByOriginal.set(sourceIndex, remappedIndex);
+  });
+
+  const remappedIndexes = sprite.indexes.map((paletteIndex) =>
+    paletteIndex === transparentPaletteIndex ? transparentPaletteIndex : (remappedIndexByOriginal.get(paletteIndex) ?? transparentPaletteIndex),
+  );
+
+  return {
+    palette: remappedPalette,
+    indexes: remappedIndexes,
+  };
 }
 
 function extractSpriteFromSource(): void {
@@ -1574,6 +1861,11 @@ async function handleSpriteContextMenuAction(payload: SpriteContextMenuActionPay
     return;
   }
 
+  if (payload.action === "save-palette") {
+    await saveSpritePaletteAsIndexedPng(sprite);
+    return;
+  }
+
   removeSprite(sprite);
 }
 
@@ -1637,6 +1929,50 @@ async function saveSpriteAsIndexedPng(sprite: IndexedSprite): Promise<void> {
     closeSpriteContextMenu();
   } catch (error) {
     showErrorToast("Save failed", error instanceof Error ? error.message : "Unable to save sprite.");
+  }
+}
+
+async function saveSpritePaletteAsIndexedPng(sprite: IndexedSprite): Promise<void> {
+  try {
+    const opaquePalette = sprite.palette.filter((color) => color.alpha === 255);
+    if (opaquePalette.length === 0) {
+      showWarningToast("No opaque colors", "Palette export requires at least one fully opaque color.");
+      return;
+    }
+
+    const paletteSprite: IndexedSprite = {
+      id: sprite.id,
+      name: `${sprite.name} palette`,
+      sourceAction: sprite.sourceAction,
+      sourceFileName: sprite.sourceFileName,
+      width: opaquePalette.length,
+      height: 1,
+      palette: opaquePalette,
+      indexes: opaquePalette.map((_, index) => index),
+      src: "",
+    };
+    const png = createIndexedPng(paletteSprite);
+
+    if (isRunningInTauri()) {
+      const path = await save({
+        title: "Save Palette",
+        defaultPath: `${sanitizeFileName(sprite.name) || "sprite"}_palette.png`,
+        filters: [{ name: "PNG Image", extensions: ["png"] }],
+      });
+
+      if (!path) {
+        return;
+      }
+
+      await invoke("save_file", { path, bytes: Array.from(png) });
+      closeSpriteContextMenu();
+      return;
+    }
+
+    downloadSpritePng({ ...paletteSprite, name: `${sprite.name}_palette` }, png);
+    closeSpriteContextMenu();
+  } catch (error) {
+    showErrorToast("Save failed", error instanceof Error ? error.message : "Unable to save sprite palette.");
   }
 }
 
@@ -1749,6 +2085,13 @@ function removeSprite(sprite: IndexedSprite): void {
       label="Save"
       class="sprite-context-menu-action"
       @click="sendDetachedSpriteContextMenuAction('save')"
+    />
+    <Button
+      type="button"
+      text
+      label="Save Palette"
+      class="sprite-context-menu-action"
+      @click="sendDetachedSpriteContextMenuAction('save-palette')"
     />
     <Button
       type="button"
@@ -1885,7 +2228,66 @@ function removeSprite(sprite: IndexedSprite): void {
           </TabPanel>
 
           <TabPanel value="update-palette">
-            <div class="empty-tab">Update Palette content placeholder</div>
+            <section class="update-palette-layout">
+              <SpriteViewer
+                :preview-src="updatePalettePreview.src"
+                :palette="updatePalettePreview.palette.map((color) => ({ color: colorToCss(color), label: colorToHex(color) }))"
+                :indexes="updatePalettePreview.indexes"
+                :width="updatePalettePreview.width"
+                :height="updatePalettePreview.height"
+              />
+
+              <Panel header="Color Mapping" class="palette-remap-panel">
+                <div v-if="selectedSprite" class="palette-remap-content">
+                  <ul class="palette-remap-list" aria-label="Palette color remap list">
+                    <li v-for="row in paletteRemapRows" :key="row.index" class="palette-remap-row">
+                      <div class="palette-remap-color">
+                        <span class="palette-remap-swatch" :style="{ backgroundColor: colorToCss(row.sourceColor) }" />
+                        <span class="palette-remap-label">{{ row.index }}: {{ colorToHex(row.sourceColor) }}</span>
+                      </div>
+                      <span class="palette-remap-arrow" aria-hidden="true">→</span>
+                      <div class="palette-remap-target">
+                        <input
+                          type="color"
+                          class="palette-remap-input"
+                          :value="colorToHex(row.targetColor)"
+                          @input="handleRemapColorInput(row.index, $event)"
+                        />
+                        <span class="palette-remap-label">{{ colorToHex(row.targetColor) }}</span>
+                      </div>
+                    </li>
+                  </ul>
+                  <div class="palette-remap-controls">
+                    <input
+                      ref="paletteFileInput"
+                      type="file"
+                      class="visually-hidden"
+                      accept="image/*"
+                      @change="handlePaletteImageUpload"
+                    />
+                    <Button type="button" label="Load Palette" :disabled="!canApplyPaletteRemap" @click="loadPaletteImageForRemap" />
+                    <label class="palette-remap-toggle">
+                      <input v-model="showRemapPreview" type="checkbox" />
+                      <span>Preview</span>
+                    </label>
+                    <label class="palette-remap-toggle">
+                      <input v-model="dedupeRemappedColors" type="checkbox" />
+                      <span>Dedupe remapped colors</span>
+                    </label>
+                    <div class="palette-remap-actions">
+                      <Button type="button" label="Remap" :disabled="!canApplyPaletteRemap" @click="remapSelectedSpritePalette" />
+                      <Button
+                        type="button"
+                        label="Remap to New"
+                        :disabled="!canApplyPaletteRemap"
+                        @click="remapSelectedSpritePaletteToNew"
+                      />
+                    </div>
+                  </div>
+                </div>
+                <div v-else class="empty-tab palette-remap-empty">Select a sprite to update palette</div>
+              </Panel>
+            </section>
           </TabPanel>
 
           <TabPanel value="edit-sprite">
@@ -1936,6 +2338,14 @@ function removeSprite(sprite: IndexedSprite): void {
           label="Save"
           class="sprite-context-menu-action"
           @click="saveSpriteAsIndexedPng(spriteContextMenu.sprite)"
+        />
+        <Button
+          type="button"
+          role="menuitem"
+          text
+          label="Save Palette"
+          class="sprite-context-menu-action"
+          @click="saveSpritePaletteAsIndexedPng(spriteContextMenu.sprite)"
         />
         <Button
           type="button"
