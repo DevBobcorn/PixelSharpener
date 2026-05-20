@@ -12,7 +12,7 @@ import Tabs from "primevue/tabs";
 import Toast from "primevue/toast";
 import { useToast } from "primevue/usetoast";
 import { invoke } from "@tauri-apps/api/core";
-import { save } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import SpriteViewer from "./components/SpriteViewer.vue";
@@ -29,6 +29,8 @@ type IndexedSprite = {
   name: string;
   sourceAction: "Extracted" | "Imported" | "Remapped";
   sourceFileName: string;
+  sourceFilePath?: string;
+  sourceFileDirty?: boolean;
   src: string;
   width: number;
   height: number;
@@ -94,7 +96,7 @@ type ColorCluster = {
 
 type SourceImagePointerMode = "pan" | "draw-selection" | "drag-selection-point";
 type MergeMethod = "by-distance" | "by-color-count";
-type SpriteContextMenuAction = "sort-palette-by-brightness" | "save" | "save-palette" | "remove";
+type SpriteContextMenuAction = "sort-palette-by-brightness" | "save" | "save-as" | "save-palette" | "remove";
 
 type SpriteContextMenuActionPayload = {
   action: SpriteContextMenuAction;
@@ -143,8 +145,10 @@ const minSourceImageZoom = 1;
 const maxSourceImageZoom = 32;
 const transparentPaletteIndex = -1;
 const spriteContextMenuWindowLabel = "sprite-context-menu";
-const spriteContextMenuWindowWidth = 260;
-const spriteContextMenuWindowHeight = 145;
+const spriteContextMenuWindowMinWidth = 192;
+const spriteContextMenuActionHeight = 24;
+const spriteContextMenuWindowVerticalPadding = 32;
+const spriteContextMenuWindowHorizontalPadding = 72;
 const pngSignature = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
 const crc32Table = createCrc32Table();
 const mergeMethodOptions: { label: string; value: MergeMethod }[] = [
@@ -152,10 +156,9 @@ const mergeMethodOptions: { label: string; value: MergeMethod }[] = [
   { label: "By Color Count", value: "by-color-count" },
 ];
 const isDetachedSpriteContextMenu = window.location.hash.startsWith("#sprite-context-menu");
-const detachedSpriteContextMenuSpriteId = Number.parseInt(
-  new URLSearchParams(window.location.hash.split("?")[1] ?? "").get("spriteId") ?? "",
-  10,
-);
+const detachedSpriteContextMenuParams = new URLSearchParams(window.location.hash.split("?")[1] ?? "");
+const detachedSpriteContextMenuSpriteId = Number.parseInt(detachedSpriteContextMenuParams.get("spriteId") ?? "", 10);
+const detachedSpriteContextMenuCanSaveToSource = detachedSpriteContextMenuParams.get("canSaveToSource") === "1";
 
 const sourceImageTransformStyle = computed(() => ({
   height: sourceImage.value ? `${sourceImage.value.height * sourceImageZoom.value}px` : undefined,
@@ -517,9 +520,74 @@ function readUint32(data: Uint8Array, offset: number): number {
   return ((data[offset] << 24) | (data[offset + 1] << 16) | (data[offset + 2] << 8) | data[offset + 3]) >>> 0;
 }
 
-function importSprites(): void {
+async function importSprites(): Promise<void> {
   closeSpriteContextMenu();
+
+  if (isRunningInTauri()) {
+    await importSpritesFromTauriDialog();
+    return;
+  }
+
   fileInput.value?.click();
+}
+
+async function importSpritesFromTauriDialog(): Promise<void> {
+  try {
+    const selectedPaths = await open({
+      title: "Import Sprites",
+      multiple: true,
+      filters: [{ name: "Image", extensions: ["png", "jpg", "jpeg", "gif", "bmp", "webp", "avif"] }],
+    });
+    const paths = normalizeSelectedPaths(selectedPaths);
+    if (paths.length === 0) {
+      return;
+    }
+
+    const importedSprites = await Promise.all(paths.map((path) => pathToIndexedSprite(path)));
+    openedSprites.value.push(...importedSprites);
+    selectedSprite.value = importedSprites[0] ?? null;
+  } catch (error) {
+    showErrorToast("Import failed", error instanceof Error ? error.message : "Unable to import sprite.");
+    fileInput.value?.click();
+  }
+}
+
+function normalizeSelectedPaths(selectedPaths: string | string[] | null): string[] {
+  if (!selectedPaths) {
+    return [];
+  }
+
+  return (Array.isArray(selectedPaths) ? selectedPaths : [selectedPaths]).filter((path) => path.trim().length > 0);
+}
+
+async function pathToIndexedSprite(path: string): Promise<IndexedSprite> {
+  const bytes = await invoke<number[]>("read_file", { path });
+  const fileName = getFileNameFromPath(path);
+  const file = new File([new Uint8Array(bytes)], fileName, { type: getImageMimeType(fileName) });
+  const sprite = await fileToIndexedSprite(file);
+  sprite.sourceFilePath = path;
+  sprite.sourceFileDirty = false;
+  return sprite;
+}
+
+function getFileNameFromPath(path: string): string {
+  const parts = path.split(/[\\/]/);
+  return parts[parts.length - 1] || path;
+}
+
+function getImageMimeType(fileName: string): string {
+  const extension = fileName.split(".").pop()?.toLowerCase() ?? "";
+  const mimeByExtension: Record<string, string> = {
+    avif: "image/avif",
+    bmp: "image/bmp",
+    gif: "image/gif",
+    jpeg: "image/jpeg",
+    jpg: "image/jpeg",
+    png: "image/png",
+    webp: "image/webp",
+  };
+
+  return mimeByExtension[extension] ?? "image/png";
 }
 
 function uploadSourceImage(): void {
@@ -719,6 +787,7 @@ function applyPaletteRemapToSprite(sprite: IndexedSprite, targets: RgbaColor[]):
   sprite.palette = palette;
   sprite.indexes = indexes;
   sprite.src = renderIndexedSpriteToDataUri(sprite.width, sprite.height, palette, indexes);
+  markSpriteAsDirty(sprite);
 }
 
 function remapSpritePalette(
@@ -902,6 +971,7 @@ async function fileToIndexedSprite(file: File): Promise<IndexedSprite> {
     name: file.name.replace(/\.[^.]+$/, "") || `Sprite ${nextSpriteId}`,
     sourceAction: "Imported",
     sourceFileName: file.name,
+    sourceFileDirty: false,
     width: canvas.width,
     height: canvas.height,
     palette,
@@ -969,6 +1039,7 @@ async function fileToIndexedPngSprite(file: File): Promise<IndexedSprite | null>
     name: file.name.replace(/\.[^.]+$/, "") || `Sprite ${nextSpriteId}`,
     sourceAction: "Imported",
     sourceFileName: file.name,
+    sourceFileDirty: false,
     width,
     height,
     palette,
@@ -1750,15 +1821,18 @@ async function openSpriteContextMenu(event: MouseEvent, sprite: IndexedSprite): 
 
 async function openDetachedSpriteContextMenu(event: MouseEvent, sprite: IndexedSprite): Promise<void> {
   await closeDetachedSpriteContextMenuWindow();
-  const menuPosition = getDetachedSpriteContextMenuPosition(event);
+  const canSaveToSource = canSaveSpriteToSource(sprite);
+  const menuWidth = getDetachedSpriteContextMenuWidth(canSaveToSource);
+  const menuHeight = getDetachedSpriteContextMenuHeight(canSaveToSource);
+  const menuPosition = getDetachedSpriteContextMenuPosition(event, menuWidth, menuHeight);
 
   const menuWindow = new WebviewWindow(spriteContextMenuWindowLabel, {
-    url: `/#sprite-context-menu?spriteId=${sprite.id}`,
+    url: `/#sprite-context-menu?spriteId=${sprite.id}&canSaveToSource=${canSaveToSource ? "1" : "0"}`,
     title: "Sprite Menu",
     x: menuPosition.x,
     y: menuPosition.y,
-    width: spriteContextMenuWindowWidth,
-    height: spriteContextMenuWindowHeight,
+    width: menuWidth,
+    height: menuHeight,
     decorations: false,
     resizable: false,
     alwaysOnTop: true,
@@ -1775,7 +1849,38 @@ async function openDetachedSpriteContextMenu(event: MouseEvent, sprite: IndexedS
   });
 }
 
-function getDetachedSpriteContextMenuPosition(event: MouseEvent): PixelPosition {
+function getDetachedSpriteContextMenuHeight(canSaveToSource: boolean): number {
+  const actionCount = canSaveToSource ? 5 : 4;
+  return actionCount * spriteContextMenuActionHeight + spriteContextMenuWindowVerticalPadding;
+}
+
+function getDetachedSpriteContextMenuWidth(canSaveToSource: boolean): number {
+  const labels = [
+    "Sort Palette by Brightness",
+    ...(canSaveToSource ? ["Save"] : []),
+    "Save as",
+    "Save Palette",
+    "Remove",
+  ];
+  const widestLabel = Math.max(...labels.map(measureDetachedSpriteContextMenuLabelWidth));
+
+  return Math.max(spriteContextMenuWindowMinWidth, Math.ceil(widestLabel + spriteContextMenuWindowHorizontalPadding));
+}
+
+function measureDetachedSpriteContextMenuLabelWidth(label: string): number {
+  const context = document.createElement("canvas").getContext("2d");
+  if (!context) {
+    return label.length * 8;
+  }
+
+  const rootFontSize = Number.parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+  const bodyFontFamily = getComputedStyle(document.body).fontFamily || "sans-serif";
+  context.font = `${0.78 * rootFontSize}px ${bodyFontFamily}`;
+
+  return context.measureText(label).width;
+}
+
+function getDetachedSpriteContextMenuPosition(event: MouseEvent, menuWidth: number, menuHeight: number): PixelPosition {
   const screenBounds = getAvailableScreenBounds();
   const margin = 4;
 
@@ -1783,12 +1888,12 @@ function getDetachedSpriteContextMenuPosition(event: MouseEvent): PixelPosition 
     x: clamp(
       event.screenX,
       screenBounds.x + margin,
-      screenBounds.x + screenBounds.width - spriteContextMenuWindowWidth - margin,
+      screenBounds.x + screenBounds.width - menuWidth - margin,
     ),
     y: clamp(
       event.screenY,
       screenBounds.y + margin,
-      screenBounds.y + screenBounds.height - spriteContextMenuWindowHeight - margin,
+      screenBounds.y + screenBounds.height - menuHeight - margin,
     ),
   };
 }
@@ -1857,6 +1962,11 @@ async function handleSpriteContextMenuAction(payload: SpriteContextMenuActionPay
   }
 
   if (payload.action === "save") {
+    await saveSpriteToSourcePath(sprite);
+    return;
+  }
+
+  if (payload.action === "save-as") {
     await saveSpriteAsIndexedPng(sprite);
     return;
   }
@@ -1921,11 +2031,29 @@ async function saveSpriteAsIndexedPng(sprite: IndexedSprite): Promise<void> {
       }
 
       await invoke("save_file", { path, bytes: Array.from(png) });
+      markSpriteAsClean(sprite);
       closeSpriteContextMenu();
       return;
     }
 
     downloadSpritePng(sprite, png);
+    markSpriteAsClean(sprite);
+    closeSpriteContextMenu();
+  } catch (error) {
+    showErrorToast("Save failed", error instanceof Error ? error.message : "Unable to save sprite.");
+  }
+}
+
+async function saveSpriteToSourcePath(sprite: IndexedSprite): Promise<void> {
+  if (!canSaveSpriteToSource(sprite)) {
+    showWarningToast("Save unavailable", "This sprite has no original import path to save back to.");
+    return;
+  }
+
+  try {
+    const png = createIndexedPng(sprite);
+    await invoke("save_file", { path: sprite.sourceFilePath, bytes: Array.from(png) });
+    markSpriteAsClean(sprite);
     closeSpriteContextMenu();
   } catch (error) {
     showErrorToast("Save failed", error instanceof Error ? error.message : "Unable to save sprite.");
@@ -1996,7 +2124,28 @@ function sanitizeFileName(name: string): string {
 }
 
 function getSpriteTooltip(sprite: IndexedSprite): string {
-  return `${sprite.id}: ${sprite.sourceAction} from ${sprite.sourceFileName}`;
+  const base = `${sprite.id}: ${sprite.sourceAction} from ${sprite.sourceFileName}`;
+  return sprite.sourceFilePath ? `${base} (${sprite.sourceFilePath})` : base;
+}
+
+function canSaveSpriteToSource(sprite: IndexedSprite): boolean {
+  return sprite.sourceAction === "Imported" && Boolean(sprite.sourceFilePath?.trim());
+}
+
+function markSpriteAsDirty(sprite: IndexedSprite): void {
+  if (canSaveSpriteToSource(sprite)) {
+    sprite.sourceFileDirty = true;
+  }
+}
+
+function markSpriteAsClean(sprite: IndexedSprite): void {
+  if (canSaveSpriteToSource(sprite)) {
+    sprite.sourceFileDirty = false;
+  }
+}
+
+function getSpriteSourceIndicatorIcon(sprite: IndexedSprite): string {
+  return sprite.sourceFileDirty ? "pi-exclamation-circle" : "pi-check-circle";
 }
 
 function showSpriteTooltip(event: MouseEvent | FocusEvent, sprite: IndexedSprite): void {
@@ -2046,6 +2195,7 @@ function sortSpritePaletteByBrightness(sprite: IndexedSprite): void {
   sprite.palette = sortedPaletteEntries.map(({ color }) => color);
   sprite.indexes = sprite.indexes.map((index) => newIndexByOldIndex.get(index) ?? index);
   sprite.src = renderIndexedSpriteToDataUri(sprite.width, sprite.height, sprite.palette, sprite.indexes);
+  markSpriteAsDirty(sprite);
   closeSpriteContextMenu();
 }
 
@@ -2080,11 +2230,19 @@ function removeSprite(sprite: IndexedSprite): void {
       @click="sendDetachedSpriteContextMenuAction('sort-palette-by-brightness')"
     />
     <Button
+      v-if="detachedSpriteContextMenuCanSaveToSource"
       type="button"
       text
       label="Save"
       class="sprite-context-menu-action"
       @click="sendDetachedSpriteContextMenuAction('save')"
+    />
+    <Button
+      type="button"
+      text
+      label="Save as"
+      class="sprite-context-menu-action"
+      @click="sendDetachedSpriteContextMenuAction('save-as')"
     />
     <Button
       type="button"
@@ -2313,6 +2471,12 @@ function removeSprite(sprite: IndexedSprite): void {
             :aria-label="`Open ${sprite.name}. ${getSpriteTooltip(sprite)}`"
           >
             <img :src="sprite.src" :alt="sprite.name" class="sprite-thumb" />
+            <span
+              v-if="canSaveSpriteToSource(sprite)"
+              class="sprite-source-path-indicator pi"
+              :class="getSpriteSourceIndicatorIcon(sprite)"
+              aria-hidden="true"
+            />
           </button>
         </li>
       </ul>
@@ -2332,10 +2496,19 @@ function removeSprite(sprite: IndexedSprite): void {
           @click="sortSpritePaletteByBrightness(spriteContextMenu.sprite)"
         />
         <Button
+          v-if="canSaveSpriteToSource(spriteContextMenu.sprite)"
           type="button"
           role="menuitem"
           text
           label="Save"
+          class="sprite-context-menu-action"
+          @click="saveSpriteToSourcePath(spriteContextMenu.sprite)"
+        />
+        <Button
+          type="button"
+          role="menuitem"
+          text
+          label="Save as"
           class="sprite-context-menu-action"
           @click="saveSpriteAsIndexedPng(spriteContextMenu.sprite)"
         />
