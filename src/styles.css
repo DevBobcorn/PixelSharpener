@@ -290,6 +290,26 @@ body {
   min-height: 0;
 }
 
+.palette-resize-options {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.palette-resize-options-panel {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.palette-resize-options-panel .p-panel-content-container,
+.palette-resize-options-panel .p-panel-content-wrapper,
+.palette-resize-options-panel .p-panel-content {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
 .source-pixel-position {
   position: absolute;
   top: 0.5rem;

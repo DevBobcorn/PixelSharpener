@@ -96,6 +96,7 @@ type ColorCluster = {
 
 type SourceImagePointerMode = "pan" | "draw-selection" | "drag-selection-point";
 type MergeMethod = "by-distance" | "by-color-count";
+type ResizePaletteMode = "reduce" | "interpolate";
 type SpriteContextMenuAction = "sort-palette-by-brightness" | "save" | "save-as" | "save-palette" | "remove";
 
 type SpriteContextMenuActionPayload = {
@@ -130,10 +131,16 @@ const sourceSelectionActivePointIndex = ref<number | null>(null);
 const sourceGridM = ref<number | null>(16);
 const sourceGridN = ref<number | null>(16);
 const mergeValue = ref<number | null>(0);
+const resizePaletteMode = ref<ResizePaletteMode>("reduce");
+const resizeMergeValue = ref<number | null>(0);
+const resizeInterpolateColorCount = ref<number | null>(1);
+const resizeInterpolateAutoSmooth = ref(false);
 const paletteRemapTargets = ref<RgbaColor[]>([]);
 const dedupeRemappedColors = ref(true);
 const showRemapPreview = ref(false);
+const showResizePreview = ref(false);
 const mergeMethod = ref<MergeMethod>("by-distance");
+const resizeMergeMethod = ref<MergeMethod>("by-distance");
 const spriteContextMenu = ref<SpriteContextMenu | null>(null);
 const spriteTooltip = ref<SpriteTooltip | null>(null);
 const toast = useToast();
@@ -155,6 +162,10 @@ const mergeMethodOptions: { label: string; value: MergeMethod }[] = [
   { label: "By Distance", value: "by-distance" },
   { label: "By Color Count", value: "by-color-count" },
 ];
+const resizePaletteModeOptions: { label: string; value: ResizePaletteMode }[] = [
+  { label: "Reduce", value: "reduce" },
+  { label: "Interpolate", value: "interpolate" },
+];
 const isDetachedSpriteContextMenu = window.location.hash.startsWith("#sprite-context-menu");
 const detachedSpriteContextMenuParams = new URLSearchParams(window.location.hash.split("?")[1] ?? "");
 const detachedSpriteContextMenuSpriteId = Number.parseInt(detachedSpriteContextMenuParams.get("spriteId") ?? "", 10);
@@ -169,6 +180,21 @@ const sourceImageTransformStyle = computed(() => ({
 const sourceSelectionPolygonPoints = computed(() => sourceSelection.value?.map(({ x, y }) => `${x},${y}`).join(" ") ?? "");
 const sourceSelectionControlPointRadius = computed(() => 6 / sourceImageZoom.value);
 const mergeValueLabel = computed(() => (mergeMethod.value === "by-distance" ? "Distance" : "Color Count"));
+const resizeMergeValueLabel = computed(() => (resizeMergeMethod.value === "by-distance" ? "Distance" : "Color Count"));
+const selectedSpritePaletteColorCount = computed(() => selectedSprite.value?.palette.length ?? 0);
+const canApplyPaletteResize = computed(() => {
+  if (!selectedSprite.value) {
+    return false;
+  }
+
+  if (isResizePaletteReducing.value) {
+    return true;
+  }
+
+  return (resizeInterpolateColorCount.value ?? 0) > 0;
+});
+const isResizePaletteReducing = computed(() => resizePaletteMode.value === "reduce");
+const isResizePaletteInterpolating = computed(() => resizePaletteMode.value === "interpolate");
 const paletteRemapRows = computed<PaletteRemapRow[]>(() => {
   const sprite = selectedSprite.value;
   if (!sprite) {
@@ -218,6 +244,58 @@ const updatePalettePreview = computed<{
     src: renderIndexedSpriteToDataUri(sprite.width, sprite.height, palette, indexes),
     palette,
     indexes,
+    width: sprite.width,
+    height: sprite.height,
+  };
+});
+const resizePalettePreview = computed<{
+  src?: string;
+  palette: RgbaColor[];
+  indexes: number[];
+  width: number;
+  height: number;
+}>(() => {
+  const sprite = selectedSprite.value;
+  if (!sprite) {
+    return {
+      src: undefined,
+      palette: [],
+      indexes: [],
+      width: 1,
+      height: 1,
+    };
+  }
+
+  if (!showResizePreview.value) {
+    return {
+      src: sprite.src,
+      palette: sprite.palette,
+      indexes: sprite.indexes,
+      width: sprite.width,
+      height: sprite.height,
+    };
+  }
+
+  if (isResizePaletteReducing.value) {
+    const reducedData = reduceIndexedSpritePalette(sprite);
+    return {
+      src: renderIndexedSpriteToDataUri(sprite.width, sprite.height, reducedData.palette, reducedData.indexes),
+      palette: reducedData.palette,
+      indexes: reducedData.indexes,
+      width: sprite.width,
+      height: sprite.height,
+    };
+  }
+
+  const interpolatedData = interpolateIndexedSpritePalette(
+    sprite,
+    resizeInterpolateColorCount.value,
+    resizeInterpolateAutoSmooth.value,
+  );
+  return {
+    src: sprite.src,
+    palette: interpolatedData.palette,
+    indexes: interpolatedData.indexes,
     width: sprite.width,
     height: sprite.height,
   };
@@ -687,6 +765,278 @@ function remapSelectedSpritePaletteToNew(): void {
   const remappedSprite = createRemappedSprite(sprite, paletteRemapTargets.value);
   openedSprites.value.push(remappedSprite);
   selectedSprite.value = remappedSprite;
+}
+
+function resizeSelectedSpritePalette(): void {
+  const sprite = selectedSprite.value;
+  if (!sprite || !canApplyPaletteResize.value) {
+    showWarningToast("Sprite required", "Select a sprite before resizing its palette.");
+    return;
+  }
+
+  if (isResizePaletteInterpolating.value) {
+    const interpolatedData = interpolateIndexedSpritePalette(
+      sprite,
+      resizeInterpolateColorCount.value,
+      resizeInterpolateAutoSmooth.value,
+    );
+    sprite.palette = interpolatedData.palette;
+    sprite.indexes = interpolatedData.indexes;
+    sprite.src = renderIndexedSpriteToDataUri(sprite.width, sprite.height, sprite.palette, sprite.indexes);
+    markSpriteAsDirty(sprite);
+    return;
+  }
+
+  const reducedData = reduceIndexedSpritePalette(sprite);
+  sprite.palette = reducedData.palette;
+  sprite.indexes = reducedData.indexes;
+  sprite.src = renderIndexedSpriteToDataUri(sprite.width, sprite.height, sprite.palette, sprite.indexes);
+  markSpriteAsDirty(sprite);
+}
+
+function resizeSelectedSpritePaletteToNew(): void {
+  const sprite = selectedSprite.value;
+  if (!sprite || !canApplyPaletteResize.value) {
+    showWarningToast("Sprite required", "Select a sprite before creating a resized copy.");
+    return;
+  }
+
+  if (isResizePaletteInterpolating.value) {
+    const interpolatedData = interpolateIndexedSpritePalette(
+      sprite,
+      resizeInterpolateColorCount.value,
+      resizeInterpolateAutoSmooth.value,
+    );
+    const interpolatedSprite: IndexedSprite = {
+      ...sprite,
+      id: nextSpriteId++,
+      name: `${sprite.name} interpolate`,
+      sourceAction: "Remapped",
+      palette: interpolatedData.palette,
+      indexes: interpolatedData.indexes,
+      src: renderIndexedSpriteToDataUri(sprite.width, sprite.height, interpolatedData.palette, interpolatedData.indexes),
+    };
+    openedSprites.value.push(interpolatedSprite);
+    selectedSprite.value = interpolatedSprite;
+    return;
+  }
+
+  const reducedData = reduceIndexedSpritePalette(sprite);
+  const reducedSprite: IndexedSprite = {
+    ...sprite,
+    id: nextSpriteId++,
+    name: `${sprite.name} resize`,
+    sourceAction: "Remapped",
+    palette: reducedData.palette,
+    indexes: reducedData.indexes,
+    src: renderIndexedSpriteToDataUri(sprite.width, sprite.height, reducedData.palette, reducedData.indexes),
+  };
+  openedSprites.value.push(reducedSprite);
+  selectedSprite.value = reducedSprite;
+}
+
+function reduceIndexedSpritePalette(
+  sprite: IndexedSprite,
+): {
+  palette: RgbaColor[];
+  indexes: number[];
+} {
+  const colorsByPixel: RgbaColor[] = [];
+  sprite.indexes.forEach((paletteIndex) => {
+    if (paletteIndex === transparentPaletteIndex) {
+      return;
+    }
+
+    const color = sprite.palette[paletteIndex];
+    if (color) {
+      colorsByPixel.push(color);
+    }
+  });
+
+  if (colorsByPixel.length === 0) {
+    return {
+      palette: sprite.palette.map(cloneColor),
+      indexes: [...sprite.indexes],
+    };
+  }
+
+  const reducedColors = reduceSpriteColors(colorsByPixel, resizeMergeMethod.value, resizeMergeValue.value);
+  const reducedPalette: RgbaColor[] = [];
+  const reducedPaletteLookup = new Map<string, number>();
+  const reducedIndexes: number[] = [];
+  let reducedColorIndex = 0;
+
+  sprite.indexes.forEach((paletteIndex) => {
+    if (paletteIndex === transparentPaletteIndex) {
+      reducedIndexes.push(transparentPaletteIndex);
+      return;
+    }
+
+    const color = reducedColors[reducedColorIndex] ?? sprite.palette[paletteIndex];
+    reducedColorIndex += 1;
+
+    const key = colorToKey(color);
+    let nextPaletteIndex = reducedPaletteLookup.get(key);
+    if (nextPaletteIndex === undefined) {
+      nextPaletteIndex = reducedPalette.length;
+      reducedPaletteLookup.set(key, nextPaletteIndex);
+      reducedPalette.push(cloneColor(color));
+    }
+
+    reducedIndexes.push(nextPaletteIndex);
+  });
+
+  return {
+    palette: reducedPalette,
+    indexes: reducedIndexes,
+  };
+}
+
+function interpolateIndexedSpritePalette(
+  sprite: IndexedSprite,
+  addCount: number | null,
+  autoSmooth: boolean,
+): {
+  palette: RgbaColor[];
+  indexes: number[];
+} {
+  const additionalColorCount = Math.max(0, Math.floor(addCount ?? 0));
+  if (additionalColorCount <= 0 || sprite.palette.length < 2) {
+    return {
+      palette: sprite.palette.map(cloneColor),
+      indexes: [...sprite.indexes],
+    };
+  }
+
+  const segmentCount = sprite.palette.length - 1;
+  const baseInsertCountPerSegment = Math.floor(additionalColorCount / segmentCount);
+  const segmentRemainder = additionalColorCount % segmentCount;
+  const insertCounts = Array.from({ length: segmentCount }, (_, segmentIndex) =>
+    baseInsertCountPerSegment + (segmentIndex < segmentRemainder ? 1 : 0),
+  );
+  const interpolatedPalette: RgbaColor[] = [];
+  const remappedPaletteIndexByOriginal = new Map<number, number>();
+
+  for (let paletteIndex = 0; paletteIndex < sprite.palette.length; paletteIndex += 1) {
+    remappedPaletteIndexByOriginal.set(paletteIndex, interpolatedPalette.length);
+    interpolatedPalette.push(cloneColor(sprite.palette[paletteIndex]));
+
+    if (paletteIndex >= segmentCount) {
+      continue;
+    }
+
+    const startColor = sprite.palette[paletteIndex];
+    const endColor = sprite.palette[paletteIndex + 1];
+    const insertCount = insertCounts[paletteIndex];
+    for (let insertedIndex = 1; insertedIndex <= insertCount; insertedIndex += 1) {
+      const ratio = insertedIndex / (insertCount + 1);
+      interpolatedPalette.push(interpolateColor(startColor, endColor, ratio));
+    }
+  }
+
+  const remappedIndexes = autoSmooth
+    ? createAutoSmoothedIndexes(sprite, remappedPaletteIndexByOriginal, insertCounts)
+    : sprite.indexes.map((paletteIndex) =>
+        paletteIndex === transparentPaletteIndex ? transparentPaletteIndex : (remappedPaletteIndexByOriginal.get(paletteIndex) ?? paletteIndex),
+      );
+
+  return {
+    palette: interpolatedPalette,
+    indexes: remappedIndexes,
+  };
+}
+
+function createAutoSmoothedIndexes(
+  sprite: IndexedSprite,
+  remappedPaletteIndexByOriginal: Map<number, number>,
+  insertCounts: number[],
+): number[] {
+  const { width, height } = sprite;
+  const smoothedIndexes: number[] = [];
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const pixelIndex = y * width + x;
+      const sourcePaletteIndex = sprite.indexes[pixelIndex];
+      if (sourcePaletteIndex === transparentPaletteIndex) {
+        smoothedIndexes.push(transparentPaletteIndex);
+        continue;
+      }
+
+      // Blend palette-index position with neighborhood to push edge pixels
+      // into interpolated colors while preserving large flat regions.
+      let weightedSum = sourcePaletteIndex * 2;
+      let weight = 2;
+      const neighborOffsets = [
+        [-1, 0],
+        [1, 0],
+        [0, -1],
+        [0, 1],
+      ];
+      neighborOffsets.forEach(([dx, dy]) => {
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= width || ny >= height) {
+          return;
+        }
+
+        const neighborPaletteIndex = sprite.indexes[ny * width + nx];
+        if (neighborPaletteIndex === transparentPaletteIndex) {
+          return;
+        }
+
+        weightedSum += neighborPaletteIndex;
+        weight += 1;
+      });
+
+      const averagedPosition = weightedSum / weight;
+      const smoothedPosition = sourcePaletteIndex + (averagedPosition - sourcePaletteIndex) * 0.5;
+      smoothedIndexes.push(
+        mapPalettePositionToInterpolatedIndex(smoothedPosition, sprite.palette.length, remappedPaletteIndexByOriginal, insertCounts),
+      );
+    }
+  }
+
+  return smoothedIndexes;
+}
+
+function mapPalettePositionToInterpolatedIndex(
+  position: number,
+  paletteLength: number,
+  remappedPaletteIndexByOriginal: Map<number, number>,
+  insertCounts: number[],
+): number {
+  const clampedPosition = Math.min(Math.max(position, 0), Math.max(0, paletteLength - 1));
+  const lowerIndex = Math.floor(clampedPosition);
+  const upperIndex = Math.ceil(clampedPosition);
+  const lowerMappedIndex = remappedPaletteIndexByOriginal.get(lowerIndex) ?? lowerIndex;
+
+  if (lowerIndex === upperIndex || lowerIndex >= insertCounts.length) {
+    return lowerMappedIndex;
+  }
+
+  const ratio = clampedPosition - lowerIndex;
+  const insertedCount = insertCounts[lowerIndex];
+  const step = Math.round(ratio * (insertedCount + 1));
+  if (step <= 0) {
+    return lowerMappedIndex;
+  }
+
+  const upperMappedIndex = remappedPaletteIndexByOriginal.get(upperIndex) ?? upperIndex;
+  if (step >= insertedCount + 1) {
+    return upperMappedIndex;
+  }
+
+  return lowerMappedIndex + step;
+}
+
+function interpolateColor(start: RgbaColor, end: RgbaColor, ratio: number): RgbaColor {
+  return {
+    red: Math.round(start.red + (end.red - start.red) * ratio),
+    green: Math.round(start.green + (end.green - start.green) * ratio),
+    blue: Math.round(start.blue + (end.blue - start.blue) * ratio),
+    alpha: Math.round(start.alpha + (end.alpha - start.alpha) * ratio),
+  };
 }
 
 function loadPaletteImageForRemap(): void {
@@ -2272,7 +2622,7 @@ function removeSprite(sprite: IndexedSprite): void {
         <TabList>
           <Tab value="extract-sprite">Extract Sprite</Tab>
           <Tab value="update-palette">Update Palette</Tab>
-          <Tab value="edit-sprite">Edit Sprite</Tab>
+          <Tab value="resize-palette">Resize Palette</Tab>
         </TabList>
 
         <TabPanels>
@@ -2455,8 +2805,86 @@ function removeSprite(sprite: IndexedSprite): void {
             </section>
           </TabPanel>
 
-          <TabPanel value="edit-sprite">
-            <div class="empty-tab">Edit Sprite content placeholder</div>
+          <TabPanel value="resize-palette">
+            <section class="update-palette-layout">
+              <SpriteViewer
+                :preview-src="resizePalettePreview.src"
+                :palette="resizePalettePreview.palette.map((color) => ({ color: colorToCss(color), label: colorToHex(color) }))"
+                :indexes="resizePalettePreview.indexes"
+                :width="resizePalettePreview.width"
+                :height="resizePalettePreview.height"
+              />
+
+              <Panel header="Palette Resizing" class="palette-remap-panel">
+                <div v-if="selectedSprite" class="palette-remap-content">
+                  <div class="source-merge-controls" aria-label="Palette resizing controls">
+                    <label>
+                      <span>Original Color Count</span>
+                      <InputNumber :model-value="selectedSpritePaletteColorCount" disabled />
+                    </label>
+                    <label>
+                      <span>Mode</span>
+                      <Select
+                        v-model="resizePaletteMode"
+                        :options="resizePaletteModeOptions"
+                        option-label="label"
+                        option-value="value"
+                      />
+                    </label>
+                  </div>
+
+                  <div class="palette-resize-options">
+                    <Panel v-if="isResizePaletteReducing" header="Reduce Colors" class="palette-resize-options-panel">
+                      <div class="source-merge-controls" aria-label="Reduce color merge controls">
+                        <label>
+                          <span>{{ resizeMergeValueLabel }}</span>
+                          <InputNumber v-model="resizeMergeValue" :min="resizeMergeMethod === 'by-color-count' ? 1 : 0" show-buttons />
+                        </label>
+                        <label>
+                          <span>Merge Method</span>
+                          <Select
+                            v-model="resizeMergeMethod"
+                            :options="mergeMethodOptions"
+                            option-label="label"
+                            option-value="value"
+                          />
+                        </label>
+                      </div>
+                    </Panel>
+
+                    <Panel v-else-if="isResizePaletteInterpolating" header="Interpolate Colors" class="palette-resize-options-panel">
+                      <div class="source-merge-controls" aria-label="Interpolate color controls">
+                        <label>
+                          <span>Add Colors</span>
+                          <InputNumber v-model="resizeInterpolateColorCount" :min="1" :max="255" show-buttons />
+                        </label>
+                        <label class="palette-remap-toggle">
+                          <input v-model="resizeInterpolateAutoSmooth" type="checkbox" />
+                          <span>Auto Smooth</span>
+                        </label>
+                      </div>
+                    </Panel>
+                  </div>
+
+                  <div class="palette-remap-controls">
+                    <label class="palette-remap-toggle">
+                      <input v-model="showResizePreview" type="checkbox" />
+                      <span>Preview</span>
+                    </label>
+                    <div class="palette-remap-actions">
+                      <Button type="button" label="Resize" :disabled="!canApplyPaletteResize" @click="resizeSelectedSpritePalette" />
+                      <Button
+                        type="button"
+                        label="Resize to New"
+                        :disabled="!canApplyPaletteResize"
+                        @click="resizeSelectedSpritePaletteToNew"
+                      />
+                    </div>
+                  </div>
+                </div>
+                <div v-else class="empty-tab palette-remap-empty">Select a sprite to resize palette</div>
+              </Panel>
+            </section>
           </TabPanel>
         </TabPanels>
       </Tabs>
