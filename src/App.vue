@@ -143,14 +143,18 @@ const mergeMethod = ref<MergeMethod>("by-distance");
 const resizeMergeMethod = ref<MergeMethod>("by-distance");
 const spriteContextMenu = ref<SpriteContextMenu | null>(null);
 const spriteTooltip = ref<SpriteTooltip | null>(null);
+const spriteFileDropActive = ref(false);
+const spriteFileDropDepth = ref(0);
 const toast = useToast();
 let nextSpriteId = 1;
 let unlistenSpriteContextMenuAction: (() => void) | null = null;
 let unlistenDetachedSpriteContextMenuFocusChange: (() => void) | null = null;
+let unlistenSpriteFileDrop: (() => void) | null = null;
 
 const minSourceImageZoom = 1;
 const maxSourceImageZoom = 32;
 const transparentPaletteIndex = -1;
+const spriteImageExtensions = new Set(["avif", "bmp", "gif", "jpeg", "jpg", "png", "webp"]);
 const spriteContextMenuWindowLabel = "sprite-context-menu";
 const spriteContextMenuWindowMinWidth = 192;
 const spriteContextMenuActionHeight = 24;
@@ -335,6 +339,7 @@ onMounted(() => {
   if (!isDetachedSpriteContextMenu) {
     window.addEventListener("click", closeSpriteContextMenu);
     registerSpriteContextMenuActionListener();
+    void registerSpriteFileDropListener();
   } else {
     registerDetachedSpriteContextMenuFocusListener();
   }
@@ -348,6 +353,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("keydown", closeSpriteContextMenuOnEscape);
   unlistenSpriteContextMenuAction?.();
   unlistenDetachedSpriteContextMenuFocusChange?.();
+  unlistenSpriteFileDrop?.();
 });
 
 watch(
@@ -626,18 +632,152 @@ async function importSpritesFromTauriDialog(): Promise<void> {
       multiple: true,
       filters: [{ name: "Image", extensions: ["png", "jpg", "jpeg", "gif", "bmp", "webp", "avif"] }],
     });
-    const paths = normalizeSelectedPaths(selectedPaths);
-    if (paths.length === 0) {
-      return;
-    }
-
-    const importedSprites = await Promise.all(paths.map((path) => pathToIndexedSprite(path)));
-    openedSprites.value.push(...importedSprites);
-    selectedSprite.value = importedSprites[0] ?? null;
+    await importSpritesFromPaths(normalizeSelectedPaths(selectedPaths));
   } catch (error) {
     showErrorToast("Import failed", error instanceof Error ? error.message : "Unable to import sprite.");
     fileInput.value?.click();
   }
+}
+
+async function importSpritesFromPaths(paths: string[]): Promise<void> {
+  closeSpriteContextMenu();
+
+  const imagePaths = filterImagePaths(paths);
+  if (imagePaths.length === 0) {
+    return;
+  }
+
+  try {
+    const importedSprites = await Promise.all(imagePaths.map((path) => pathToIndexedSprite(path)));
+    openedSprites.value.push(...importedSprites);
+    selectedSprite.value = importedSprites[0] ?? null;
+  } catch (error) {
+    showErrorToast("Import failed", error instanceof Error ? error.message : "Unable to import sprite.");
+  }
+}
+
+async function importSpritesFromFiles(files: File[]): Promise<void> {
+  closeSpriteContextMenu();
+
+  const imageFiles = files.filter(isImageFile);
+  if (imageFiles.length === 0) {
+    return;
+  }
+
+  try {
+    const importedSprites = await Promise.all(imageFiles.map(fileToIndexedSprite));
+    openedSprites.value.push(...importedSprites);
+    selectedSprite.value = importedSprites[0] ?? null;
+  } catch (error) {
+    showErrorToast("Import failed", error instanceof Error ? error.message : "Unable to import sprite.");
+  }
+}
+
+function filterImagePaths(paths: string[]): string[] {
+  return paths.filter(isImagePath);
+}
+
+function isImagePath(path: string): boolean {
+  const extension = path.split(".").pop()?.toLowerCase() ?? "";
+  return spriteImageExtensions.has(extension);
+}
+
+function isImageFile(file: File): boolean {
+  if (file.type.startsWith("image/")) {
+    return true;
+  }
+
+  const extension = file.name.split(".").pop()?.toLowerCase() ?? "";
+  return spriteImageExtensions.has(extension);
+}
+
+function hasImageFilesInDataTransfer(event: DragEvent): boolean {
+  const items = event.dataTransfer?.items;
+  if (!items) {
+    return false;
+  }
+
+  return Array.from(items).some((item) => {
+    if (item.kind !== "file") {
+      return false;
+    }
+
+    if (item.type.startsWith("image/")) {
+      return true;
+    }
+
+    const file = item.getAsFile();
+    return file ? isImageFile(file) : false;
+  });
+}
+
+function handleWindowDragEnter(event: DragEvent): void {
+  if (isRunningInTauri() || !hasImageFilesInDataTransfer(event)) {
+    return;
+  }
+
+  event.preventDefault();
+  spriteFileDropDepth.value += 1;
+  spriteFileDropActive.value = true;
+}
+
+function handleWindowDragOver(event: DragEvent): void {
+  if (isRunningInTauri() || !hasImageFilesInDataTransfer(event)) {
+    return;
+  }
+
+  event.preventDefault();
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = "copy";
+  }
+}
+
+function handleWindowDragLeave(): void {
+  if (isRunningInTauri()) {
+    return;
+  }
+
+  spriteFileDropDepth.value = Math.max(0, spriteFileDropDepth.value - 1);
+  if (spriteFileDropDepth.value === 0) {
+    spriteFileDropActive.value = false;
+  }
+}
+
+async function handleWindowDrop(event: DragEvent): Promise<void> {
+  if (isRunningInTauri()) {
+    return;
+  }
+
+  event.preventDefault();
+  spriteFileDropDepth.value = 0;
+  spriteFileDropActive.value = false;
+
+  const files = Array.from(event.dataTransfer?.files ?? []);
+  await importSpritesFromFiles(files);
+}
+
+async function registerSpriteFileDropListener(): Promise<void> {
+  if (!isRunningInTauri()) {
+    return;
+  }
+
+  unlistenSpriteFileDrop = await getCurrentWindow().onDragDropEvent((event) => {
+    const payload = event.payload;
+    if (payload.type === "enter") {
+      spriteFileDropActive.value = filterImagePaths(payload.paths).length > 0;
+      return;
+    }
+
+    if (payload.type === "leave") {
+      spriteFileDropActive.value = false;
+      return;
+    }
+
+    if (payload.type === "drop") {
+      spriteFileDropActive.value = false;
+      void importSpritesFromPaths(payload.paths);
+    }
+  });
 }
 
 function normalizeSelectedPaths(selectedPaths: string | string[] | null): string[] {
@@ -1316,17 +1456,8 @@ async function handleSpriteImport(event: Event): Promise<void> {
   const input = event.target as HTMLInputElement;
   const files = Array.from(input.files ?? []);
 
-  if (files.length === 0) {
-    return;
-  }
-
   try {
-    const importedSprites = await Promise.all(files.map(fileToIndexedSprite));
-
-    openedSprites.value.push(...importedSprites);
-    selectedSprite.value = importedSprites[0];
-  } catch (error) {
-    showErrorToast("Import failed", error instanceof Error ? error.message : "Unable to import sprite.");
+    await importSpritesFromFiles(files);
   } finally {
     input.value = "";
   }
@@ -2682,7 +2813,16 @@ function removeSprite(sprite: IndexedSprite): void {
       @click="sendDetachedSpriteContextMenuAction('remove')"
     />
   </main>
-  <main v-else class="app-shell">
+  <main
+    v-else
+    class="app-shell"
+    :class="{ 'is-sprite-drop-target': spriteFileDropActive }"
+    @dragenter="handleWindowDragEnter"
+    @dragover="handleWindowDragOver"
+    @dragleave="handleWindowDragLeave"
+    @drop="handleWindowDrop"
+  >
+    <div v-if="spriteFileDropActive" class="sprite-drop-overlay" aria-hidden="true">Drop image files to import sprites</div>
     <section class="main-panel">
       <Tabs v-model:value="activeTab" class="main-tabs">
         <TabList>

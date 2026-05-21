@@ -25,8 +25,27 @@ body {
 }
 
 .app-shell {
+  position: relative;
   display: flex;
   height: 100vh;
+}
+
+.app-shell.is-sprite-drop-target {
+  outline: 2px dashed #3b82f6;
+  outline-offset: -4px;
+}
+
+.sprite-drop-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  background: rgb(59 130 246 / 12%);
+  color: #1d4ed8;
+  font-size: 1.125rem;
+  font-weight: 600;
 }
 
 .detached-sprite-context-menu {
