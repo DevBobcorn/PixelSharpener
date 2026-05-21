@@ -26,13 +26,21 @@ type PixelTooltip = {
 
 const transparentPaletteIndex = -1;
 
-const props = defineProps<{
-  previewSrc?: string;
-  palette: PaletteSwatch[];
-  indexes: number[];
-  width: number;
-  height: number;
-}>();
+const props = withDefaults(
+  defineProps<{
+    previewSrc?: string;
+    palette: PaletteSwatch[];
+    indexes: number[];
+    width: number;
+    height: number;
+    mergedPaletteIndices?: number[];
+    insertedPaletteIndices?: number[];
+  }>(),
+  {
+    mergedPaletteIndices: () => [],
+    insertedPaletteIndices: () => [],
+  },
+);
 
 const spritePreviewElement = ref<HTMLElement | null>(null);
 const spritePreviewContent = ref<HTMLElement | null>(null);
@@ -47,6 +55,9 @@ const paletteSwatches = computed<IndexedPaletteSwatch[]>(() =>
     tooltip: `${index}: ${color.label}`,
   })),
 );
+
+const mergedPaletteIndexSet = computed(() => new Set(props.mergedPaletteIndices));
+const insertedPaletteIndexSet = computed(() => new Set(props.insertedPaletteIndices));
 
 const spritePreviewScale = computed(() => {
   if (props.width <= 0 || props.height <= 0 || spritePreviewSize.value.width <= 0 || spritePreviewSize.value.height <= 0) {
@@ -193,7 +204,13 @@ function clamp(value: number, min: number, max: number): number {
         <h3 id="sprite-palette-heading" class="section-title">Palette List ({{ paletteSwatches.length }})</h3>
         <ul class="palette-items">
           <li v-for="(color, index) in paletteSwatches" :key="`${color.color}-${index}`" class="palette-item">
-            <span class="palette-swatch-wrapper">
+            <span
+              class="palette-swatch-wrapper"
+              :class="{
+                'is-merged-palette': mergedPaletteIndexSet.has(index),
+                'is-inserted-palette': insertedPaletteIndexSet.has(index),
+              }"
+            >
               <span class="palette-swatch" :style="{ backgroundColor: color.color }" :aria-label="color.tooltip" />
               <span class="palette-swatch-tooltip" role="tooltip">{{ color.tooltip }}</span>
             </span>

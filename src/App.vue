@@ -254,6 +254,8 @@ const resizePalettePreview = computed<{
   indexes: number[];
   width: number;
   height: number;
+  mergedPaletteIndices: number[];
+  insertedPaletteIndices: number[];
 }>(() => {
   const sprite = selectedSprite.value;
   if (!sprite) {
@@ -263,6 +265,8 @@ const resizePalettePreview = computed<{
       indexes: [],
       width: 1,
       height: 1,
+      mergedPaletteIndices: [],
+      insertedPaletteIndices: [],
     };
   }
 
@@ -273,6 +277,8 @@ const resizePalettePreview = computed<{
       indexes: sprite.indexes,
       width: sprite.width,
       height: sprite.height,
+      mergedPaletteIndices: [],
+      insertedPaletteIndices: [],
     };
   }
 
@@ -284,6 +290,8 @@ const resizePalettePreview = computed<{
       indexes: reducedData.indexes,
       width: sprite.width,
       height: sprite.height,
+      mergedPaletteIndices: reducedData.mergedPaletteIndices,
+      insertedPaletteIndices: [],
     };
   }
 
@@ -298,6 +306,8 @@ const resizePalettePreview = computed<{
     indexes: interpolatedData.indexes,
     width: sprite.width,
     height: sprite.height,
+    mergedPaletteIndices: [],
+    insertedPaletteIndices: interpolatedData.insertedPaletteIndices,
   };
 });
 const sourceSelectionGridLines = computed<SourceSelectionGridLine[]>(() => {
@@ -835,11 +845,25 @@ function resizeSelectedSpritePaletteToNew(): void {
   selectedSprite.value = reducedSprite;
 }
 
+function getMergedPaletteIndices(reducedPalette: RgbaColor[], originalPalette: RgbaColor[]): number[] {
+  const originalKeys = new Set(originalPalette.map(colorToKey));
+  const mergedPaletteIndices: number[] = [];
+
+  reducedPalette.forEach((color, index) => {
+    if (!originalKeys.has(colorToKey(color))) {
+      mergedPaletteIndices.push(index);
+    }
+  });
+
+  return mergedPaletteIndices;
+}
+
 function reduceIndexedSpritePalette(
   sprite: IndexedSprite,
 ): {
   palette: RgbaColor[];
   indexes: number[];
+  mergedPaletteIndices: number[];
 } {
   const colorsByPixel: RgbaColor[] = [];
   sprite.indexes.forEach((paletteIndex) => {
@@ -857,6 +881,7 @@ function reduceIndexedSpritePalette(
     return {
       palette: sprite.palette.map(cloneColor),
       indexes: [...sprite.indexes],
+      mergedPaletteIndices: [],
     };
   }
 
@@ -889,7 +914,47 @@ function reduceIndexedSpritePalette(
   return {
     palette: reducedPalette,
     indexes: reducedIndexes,
+    mergedPaletteIndices: getMergedPaletteIndices(reducedPalette, sprite.palette),
   };
+}
+
+function allocateSegmentInsertCountsByColorDistance(palette: RgbaColor[], additionalColorCount: number): number[] {
+  const segmentCount = palette.length - 1;
+  const insertCounts = Array.from({ length: segmentCount }, () => 0);
+  if (segmentCount <= 0 || additionalColorCount <= 0) {
+    return insertCounts;
+  }
+
+  const segmentDistances = Array.from({ length: segmentCount }, (_, segmentIndex) =>
+    getColorDistanceSquared(palette[segmentIndex], palette[segmentIndex + 1]),
+  );
+  const totalDistance = segmentDistances.reduce((sum, distance) => sum + distance, 0);
+  if (totalDistance <= 0) {
+    const baseInsertCountPerSegment = Math.floor(additionalColorCount / segmentCount);
+    const segmentRemainder = additionalColorCount % segmentCount;
+    return insertCounts.map((_, segmentIndex) => baseInsertCountPerSegment + (segmentIndex < segmentRemainder ? 1 : 0));
+  }
+
+  const fractionalCounts = segmentDistances.map((distance) => (distance / totalDistance) * additionalColorCount);
+  const baseCounts = fractionalCounts.map((count) => Math.floor(count));
+  let assignedCount = baseCounts.reduce((sum, count) => sum + count, 0);
+  const remainderPriority = fractionalCounts
+    .map((count, segmentIndex) => ({
+      segmentIndex,
+      remainder: count - baseCounts[segmentIndex],
+    }))
+    .sort((left, right) => right.remainder - left.remainder || left.segmentIndex - right.segmentIndex);
+
+  baseCounts.forEach((count, segmentIndex) => {
+    insertCounts[segmentIndex] = count;
+  });
+
+  for (let priorityIndex = 0; assignedCount < additionalColorCount; priorityIndex += 1) {
+    insertCounts[remainderPriority[priorityIndex].segmentIndex] += 1;
+    assignedCount += 1;
+  }
+
+  return insertCounts;
 }
 
 function interpolateIndexedSpritePalette(
@@ -899,22 +964,21 @@ function interpolateIndexedSpritePalette(
 ): {
   palette: RgbaColor[];
   indexes: number[];
+  insertedPaletteIndices: number[];
 } {
   const additionalColorCount = Math.max(0, Math.floor(addCount ?? 0));
   if (additionalColorCount <= 0 || sprite.palette.length < 2) {
     return {
       palette: sprite.palette.map(cloneColor),
       indexes: [...sprite.indexes],
+      insertedPaletteIndices: [],
     };
   }
 
   const segmentCount = sprite.palette.length - 1;
-  const baseInsertCountPerSegment = Math.floor(additionalColorCount / segmentCount);
-  const segmentRemainder = additionalColorCount % segmentCount;
-  const insertCounts = Array.from({ length: segmentCount }, (_, segmentIndex) =>
-    baseInsertCountPerSegment + (segmentIndex < segmentRemainder ? 1 : 0),
-  );
+  const insertCounts = allocateSegmentInsertCountsByColorDistance(sprite.palette, additionalColorCount);
   const interpolatedPalette: RgbaColor[] = [];
+  const insertedPaletteIndices: number[] = [];
   const remappedPaletteIndexByOriginal = new Map<number, number>();
 
   for (let paletteIndex = 0; paletteIndex < sprite.palette.length; paletteIndex += 1) {
@@ -930,6 +994,7 @@ function interpolateIndexedSpritePalette(
     const insertCount = insertCounts[paletteIndex];
     for (let insertedIndex = 1; insertedIndex <= insertCount; insertedIndex += 1) {
       const ratio = insertedIndex / (insertCount + 1);
+      insertedPaletteIndices.push(interpolatedPalette.length);
       interpolatedPalette.push(interpolateColor(startColor, endColor, ratio));
     }
   }
@@ -943,6 +1008,7 @@ function interpolateIndexedSpritePalette(
   return {
     palette: interpolatedPalette,
     indexes: remappedIndexes,
+    insertedPaletteIndices,
   };
 }
 
@@ -2813,6 +2879,8 @@ function removeSprite(sprite: IndexedSprite): void {
                 :indexes="resizePalettePreview.indexes"
                 :width="resizePalettePreview.width"
                 :height="resizePalettePreview.height"
+                :merged-palette-indices="resizePalettePreview.mergedPaletteIndices"
+                :inserted-palette-indices="resizePalettePreview.insertedPaletteIndices"
               />
 
               <Panel header="Palette Resizing" class="palette-remap-panel">
@@ -2853,7 +2921,7 @@ function removeSprite(sprite: IndexedSprite): void {
                     </Panel>
 
                     <Panel v-else-if="isResizePaletteInterpolating" header="Interpolate Colors" class="palette-resize-options-panel">
-                      <div class="source-merge-controls" aria-label="Interpolate color controls">
+                      <div class="source-merge-controls interpolate-color-controls" aria-label="Interpolate color controls">
                         <label>
                           <span>Add Colors</span>
                           <InputNumber v-model="resizeInterpolateColorCount" :min="1" :max="255" show-buttons />

@@ -274,6 +274,11 @@ body {
   font-weight: 700;
 }
 
+.source-merge-controls label.palette-remap-toggle {
+  display: flex;
+  align-items: center;
+}
+
 .palette-remap-toggle input {
   margin: 0;
 }
@@ -308,6 +313,10 @@ body {
   display: flex;
   flex: 1;
   min-height: 0;
+}
+
+.interpolate-color-controls {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .source-pixel-position {
@@ -501,6 +510,16 @@ body {
   height: 1.5rem;
   display: block;
   border: 1px solid #171717;
+}
+
+.palette-swatch-wrapper.is-merged-palette .palette-swatch {
+  border-color: #ff69b4;
+  box-shadow: 0 0 0 1px #ff69b4;
+}
+
+.palette-swatch-wrapper.is-inserted-palette .palette-swatch {
+  border-color: #32cd32;
+  box-shadow: 0 0 0 1px #32cd32;
 }
 
 .palette-swatch-tooltip,
