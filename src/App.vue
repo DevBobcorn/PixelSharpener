@@ -565,8 +565,7 @@ async function pathToIndexedSprite(path: string): Promise<IndexedSprite> {
   const fileName = getFileNameFromPath(path);
   const file = new File([new Uint8Array(bytes)], fileName, { type: getImageMimeType(fileName) });
   const sprite = await fileToIndexedSprite(file);
-  sprite.sourceFilePath = path;
-  sprite.sourceFileDirty = false;
+  applySpriteSourcePath(sprite, path);
   return sprite;
 }
 
@@ -588,6 +587,13 @@ function getImageMimeType(fileName: string): string {
   };
 
   return mimeByExtension[extension] ?? "image/png";
+}
+
+function applySpriteSourcePath(sprite: IndexedSprite, path: string): void {
+  sprite.sourceAction = "Imported";
+  sprite.sourceFilePath = path;
+  sprite.sourceFileName = getFileNameFromPath(path);
+  sprite.sourceFileDirty = false;
 }
 
 function uploadSourceImage(): void {
@@ -2031,6 +2037,7 @@ async function saveSpriteAsIndexedPng(sprite: IndexedSprite): Promise<void> {
       }
 
       await invoke("save_file", { path, bytes: Array.from(png) });
+      applySpriteSourcePath(sprite, path);
       markSpriteAsClean(sprite);
       closeSpriteContextMenu();
       return;
