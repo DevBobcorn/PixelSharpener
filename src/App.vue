@@ -301,7 +301,7 @@ const resizePalettePreview = computed<{
     resizeInterpolateAutoSmooth.value,
   );
   return {
-    src: sprite.src,
+    src: renderIndexedSpriteToDataUri(sprite.width, sprite.height, interpolatedData.palette, interpolatedData.indexes),
     palette: interpolatedData.palette,
     indexes: interpolatedData.indexes,
     width: sprite.width,
