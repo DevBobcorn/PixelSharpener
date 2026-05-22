@@ -85,6 +85,13 @@ type PaletteRemapRow = {
   targetColor: RgbaColor;
 };
 
+type AutoSmoothSettings = {
+  centerWeight?: number | null;
+  neighborWeight?: number | null;
+  blendStrength?: number | null;
+  includeDiagonalNeighbors?: boolean;
+};
+
 type ColorCluster = {
   active: boolean;
   color: RgbaColor;
@@ -135,6 +142,10 @@ const resizePaletteMode = ref<ResizePaletteMode>("reduce");
 const resizeMergeValue = ref<number | null>(0);
 const resizeInterpolateColorCount = ref<number | null>(1);
 const resizeInterpolateAutoSmooth = ref(false);
+const resizeInterpolateSmoothCenterWeight = ref<number | null>(2);
+const resizeInterpolateSmoothNeighborWeight = ref<number | null>(1);
+const resizeInterpolateSmoothBlendStrength = ref<number | null>(0.5);
+const resizeInterpolateSmoothIncludeDiagonalNeighbors = ref(false);
 const paletteRemapTargets = ref<RgbaColor[]>([]);
 const dedupeRemappedColors = ref(true);
 const showRemapPreview = ref(false);
@@ -303,6 +314,7 @@ const resizePalettePreview = computed<{
     sprite,
     resizeInterpolateColorCount.value,
     resizeInterpolateAutoSmooth.value,
+    getResizeInterpolateAutoSmoothSettings(),
   );
   return {
     src: renderIndexedSpriteToDataUri(sprite.width, sprite.height, interpolatedData.palette, interpolatedData.indexes),
@@ -929,6 +941,7 @@ function resizeSelectedSpritePalette(): void {
       sprite,
       resizeInterpolateColorCount.value,
       resizeInterpolateAutoSmooth.value,
+      getResizeInterpolateAutoSmoothSettings(),
     );
     sprite.palette = interpolatedData.palette;
     sprite.indexes = interpolatedData.indexes;
@@ -956,6 +969,7 @@ function resizeSelectedSpritePaletteToNew(): void {
       sprite,
       resizeInterpolateColorCount.value,
       resizeInterpolateAutoSmooth.value,
+      getResizeInterpolateAutoSmoothSettings(),
     );
     const interpolatedSprite: IndexedSprite = {
       ...sprite,
@@ -1101,6 +1115,7 @@ function interpolateIndexedSpritePalette(
   sprite: IndexedSprite,
   addCount: number | null,
   autoSmooth: boolean,
+  autoSmoothSettings?: AutoSmoothSettings,
 ): {
   palette: RgbaColor[];
   indexes: number[];
@@ -1140,7 +1155,7 @@ function interpolateIndexedSpritePalette(
   }
 
   const remappedIndexes = autoSmooth
-    ? createAutoSmoothedIndexes(sprite, remappedPaletteIndexByOriginal, insertCounts)
+    ? createAutoSmoothedIndexes(sprite, remappedPaletteIndexByOriginal, insertCounts, autoSmoothSettings)
     : sprite.indexes.map((paletteIndex) =>
         paletteIndex === transparentPaletteIndex ? transparentPaletteIndex : (remappedPaletteIndexByOriginal.get(paletteIndex) ?? paletteIndex),
       );
@@ -1156,7 +1171,28 @@ function createAutoSmoothedIndexes(
   sprite: IndexedSprite,
   remappedPaletteIndexByOriginal: Map<number, number>,
   insertCounts: number[],
+  autoSmoothSettings?: AutoSmoothSettings,
 ): number[] {
+  const centerWeight = normalizeAutoSmoothNumeric(autoSmoothSettings?.centerWeight, 2, 0);
+  const neighborWeight = normalizeAutoSmoothNumeric(autoSmoothSettings?.neighborWeight, 1, 0);
+  const blendStrength = normalizeAutoSmoothNumeric(autoSmoothSettings?.blendStrength, 0.5, 0, 1);
+  const neighborOffsets = autoSmoothSettings?.includeDiagonalNeighbors
+    ? [
+        [-1, 0],
+        [1, 0],
+        [0, -1],
+        [0, 1],
+        [-1, -1],
+        [-1, 1],
+        [1, -1],
+        [1, 1],
+      ]
+    : [
+        [-1, 0],
+        [1, 0],
+        [0, -1],
+        [0, 1],
+      ];
   const { width, height } = sprite;
   const smoothedIndexes: number[] = [];
 
@@ -1171,14 +1207,8 @@ function createAutoSmoothedIndexes(
 
       // Blend palette-index position with neighborhood to push edge pixels
       // into interpolated colors while preserving large flat regions.
-      let weightedSum = sourcePaletteIndex * 2;
-      let weight = 2;
-      const neighborOffsets = [
-        [-1, 0],
-        [1, 0],
-        [0, -1],
-        [0, 1],
-      ];
+      let weightedSum = sourcePaletteIndex * centerWeight;
+      let weight = centerWeight;
       neighborOffsets.forEach(([dx, dy]) => {
         const nx = x + dx;
         const ny = y + dy;
@@ -1191,12 +1221,17 @@ function createAutoSmoothedIndexes(
           return;
         }
 
-        weightedSum += neighborPaletteIndex;
-        weight += 1;
+        weightedSum += neighborPaletteIndex * neighborWeight;
+        weight += neighborWeight;
       });
 
+      if (weight <= 0) {
+        smoothedIndexes.push(remappedPaletteIndexByOriginal.get(sourcePaletteIndex) ?? sourcePaletteIndex);
+        continue;
+      }
+
       const averagedPosition = weightedSum / weight;
-      const smoothedPosition = sourcePaletteIndex + (averagedPosition - sourcePaletteIndex) * 0.5;
+      const smoothedPosition = sourcePaletteIndex + (averagedPosition - sourcePaletteIndex) * blendStrength;
       smoothedIndexes.push(
         mapPalettePositionToInterpolatedIndex(smoothedPosition, sprite.palette.length, remappedPaletteIndexByOriginal, insertCounts),
       );
@@ -1204,6 +1239,20 @@ function createAutoSmoothedIndexes(
   }
 
   return smoothedIndexes;
+}
+
+function normalizeAutoSmoothNumeric(value: number | null | undefined, fallback: number, min: number, max = Number.POSITIVE_INFINITY): number {
+  const numericValue = typeof value === "number" && Number.isFinite(value) ? value : fallback;
+  return Math.min(max, Math.max(min, numericValue));
+}
+
+function getResizeInterpolateAutoSmoothSettings(): AutoSmoothSettings {
+  return {
+    centerWeight: resizeInterpolateSmoothCenterWeight.value,
+    neighborWeight: resizeInterpolateSmoothNeighborWeight.value,
+    blendStrength: resizeInterpolateSmoothBlendStrength.value,
+    includeDiagonalNeighbors: resizeInterpolateSmoothIncludeDiagonalNeighbors.value,
+  };
 }
 
 function mapPalettePositionToInterpolatedIndex(
@@ -2822,7 +2871,7 @@ function removeSprite(sprite: IndexedSprite): void {
     @dragleave="handleWindowDragLeave"
     @drop="handleWindowDrop"
   >
-    <div v-if="spriteFileDropActive" class="sprite-drop-overlay" aria-hidden="true">Drop image files to import sprites</div>
+    <div v-if="spriteFileDropActive" class="sprite-drop-overlay" aria-hidden="true">Drop image files to import</div>
     <section class="main-panel">
       <Tabs v-model:value="activeTab" class="main-tabs">
         <TabList>
@@ -3070,6 +3119,55 @@ function removeSprite(sprite: IndexedSprite): void {
                           <input v-model="resizeInterpolateAutoSmooth" type="checkbox" />
                           <span>Auto Smooth</span>
                         </label>
+                        <div class="source-merge-controls interpolate-smooth-controls" aria-label="Auto smooth controls">
+                          <label>
+                            <span>Center Weight</span>
+                            <InputNumber
+                              v-model="resizeInterpolateSmoothCenterWeight"
+                              :min="0"
+                              :max="16"
+                              :step="0.25"
+                              :min-fraction-digits="0"
+                              :max-fraction-digits="2"
+                              :disabled="!resizeInterpolateAutoSmooth"
+                              show-buttons
+                            />
+                          </label>
+                          <label>
+                            <span>Neighbor Weight</span>
+                            <InputNumber
+                              v-model="resizeInterpolateSmoothNeighborWeight"
+                              :min="0"
+                              :max="16"
+                              :step="0.25"
+                              :min-fraction-digits="0"
+                              :max-fraction-digits="2"
+                              :disabled="!resizeInterpolateAutoSmooth"
+                              show-buttons
+                            />
+                          </label>
+                          <label>
+                            <span>Blend Strength</span>
+                            <InputNumber
+                              v-model="resizeInterpolateSmoothBlendStrength"
+                              :min="0"
+                              :max="1"
+                              :step="0.05"
+                              :min-fraction-digits="0"
+                              :max-fraction-digits="2"
+                              :disabled="!resizeInterpolateAutoSmooth"
+                              show-buttons
+                            />
+                          </label>
+                          <label class="palette-remap-toggle interpolate-smooth-toggle">
+                            <input
+                              v-model="resizeInterpolateSmoothIncludeDiagonalNeighbors"
+                              type="checkbox"
+                              :disabled="!resizeInterpolateAutoSmooth"
+                            />
+                            <span>Use Diagonal Neighbors</span>
+                          </label>
+                        </div>
                       </div>
                     </Panel>
                   </div>

@@ -31,8 +31,16 @@ body {
 }
 
 .app-shell.is-sprite-drop-target {
-  outline: 2px dashed #3b82f6;
-  outline-offset: -4px;
+  isolation: isolate;
+}
+
+.app-shell.is-sprite-drop-target::before {
+  content: "";
+  position: absolute;
+  inset: 4px;
+  z-index: 21;
+  border: 2px dashed #3b82f6;
+  pointer-events: none;
 }
 
 .sprite-drop-overlay {
@@ -336,6 +344,14 @@ body {
 
 .interpolate-color-controls {
   grid-template-columns: minmax(0, 1fr);
+}
+
+.interpolate-smooth-controls {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.interpolate-smooth-toggle {
+  grid-column: 1 / -1;
 }
 
 .source-pixel-position {
