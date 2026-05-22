@@ -15,6 +15,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import SpriteEditor from "./components/SpriteEditor.vue";
 import SpriteViewer from "./components/SpriteViewer.vue";
 
 type RgbaColor = {
@@ -104,7 +105,13 @@ type ColorCluster = {
 type SourceImagePointerMode = "pan" | "draw-selection" | "drag-selection-point";
 type MergeMethod = "by-distance" | "by-color-count";
 type ResizePaletteMode = "reduce" | "interpolate";
+type EditTool = "pencil" | "brush" | "eraser";
 type SpriteContextMenuAction = "sort-palette-by-brightness" | "save" | "save-as" | "save-palette" | "remove";
+
+type SpriteEditorPaintPayload = {
+  x: number;
+  y: number;
+};
 
 type SpriteContextMenuActionPayload = {
   action: SpriteContextMenuAction;
@@ -146,6 +153,9 @@ const resizeInterpolateSmoothCenterWeight = ref<number | null>(2);
 const resizeInterpolateSmoothNeighborWeight = ref<number | null>(1);
 const resizeInterpolateSmoothBlendStrength = ref<number | null>(0.5);
 const resizeInterpolateSmoothIncludeDiagonalNeighbors = ref(false);
+const editTool = ref<EditTool>("pencil");
+const editStrokeRadius = ref(1);
+const editForegroundPaletteIndex = ref(0);
 const paletteRemapTargets = ref<RgbaColor[]>([]);
 const dedupeRemappedColors = ref(true);
 const showRemapPreview = ref(false);
@@ -210,6 +220,18 @@ const canApplyPaletteResize = computed(() => {
 });
 const isResizePaletteReducing = computed(() => resizePaletteMode.value === "reduce");
 const isResizePaletteInterpolating = computed(() => resizePaletteMode.value === "interpolate");
+const editPaletteSwatches = computed<{ label: string; value: number; color: string }[]>(() => {
+  const sprite = selectedSprite.value;
+  if (!sprite) {
+    return [];
+  }
+
+  return sprite.palette.map((color, index) => ({
+    label: `${index}: ${colorToHex(color)}`,
+    value: index,
+    color: colorToCss(color),
+  }));
+});
 const paletteRemapRows = computed<PaletteRemapRow[]>(() => {
   const sprite = selectedSprite.value;
   if (!sprite) {
@@ -372,6 +394,7 @@ watch(
   () => (selectedSprite.value ? `${selectedSprite.value.id}:${selectedSprite.value.palette.map(colorToKey).join("|")}` : ""),
   () => {
     syncPaletteRemapTargets(selectedSprite.value);
+    syncEditorPaletteSelection(selectedSprite.value);
   },
   { immediate: true },
 );
@@ -866,6 +889,224 @@ function cloneColor(color: RgbaColor): RgbaColor {
     blue: color.blue,
     alpha: color.alpha,
   };
+}
+
+function syncEditorPaletteSelection(sprite: IndexedSprite | null): void {
+  const maxPaletteIndex = (sprite?.palette.length ?? 0) - 1;
+  editForegroundPaletteIndex.value = clamp(editForegroundPaletteIndex.value, transparentPaletteIndex, maxPaletteIndex);
+
+  if (!sprite || sprite.palette.length === 0) {
+    editForegroundPaletteIndex.value = transparentPaletteIndex;
+    return;
+  }
+
+  if (editForegroundPaletteIndex.value === transparentPaletteIndex) {
+    editForegroundPaletteIndex.value = 0;
+  }
+}
+
+function setEditTool(tool: EditTool): void {
+  editTool.value = tool;
+}
+
+function setEditPaletteIndex(paletteIndex: number): void {
+  const sprite = selectedSprite.value;
+  const maxPaletteIndex = (sprite?.palette.length ?? 0) - 1;
+  editForegroundPaletteIndex.value = clamp(paletteIndex, transparentPaletteIndex, maxPaletteIndex);
+}
+
+function isSelectedEditPalette(paletteIndex: number): boolean {
+  return editForegroundPaletteIndex.value === paletteIndex;
+}
+
+function handleEditSwatchPointerDown(event: PointerEvent, paletteIndex: number): void {
+  if (event.button !== 0) {
+    return;
+  }
+
+  setEditPaletteIndex(paletteIndex);
+}
+
+function editPaletteColor(index: number): void {
+  const sprite = selectedSprite.value;
+  if (!sprite) {
+    return;
+  }
+
+  const color = sprite.palette[index];
+  if (!color) {
+    return;
+  }
+
+  const input = document.createElement("input");
+  input.type = "color";
+  input.value = colorToHex(color);
+  input.style.position = "fixed";
+  input.style.opacity = "0";
+  input.style.pointerEvents = "none";
+  document.body.append(input);
+
+  input.addEventListener(
+    "input",
+    () => {
+      const rgb = hexToRgb(input.value);
+      if (!rgb) {
+        return;
+      }
+
+      color.red = rgb.red;
+      color.green = rgb.green;
+      color.blue = rgb.blue;
+      sprite.src = renderIndexedSpriteToDataUri(sprite.width, sprite.height, sprite.palette, sprite.indexes);
+      markSpriteAsDirty(sprite);
+    },
+    { once: true },
+  );
+
+  input.addEventListener(
+    "change",
+    () => {
+      input.remove();
+    },
+    { once: true },
+  );
+
+  input.addEventListener(
+    "blur",
+    () => {
+      input.remove();
+    },
+    { once: true },
+  );
+
+  input.click();
+}
+
+function addSpritePaletteColor(): void {
+  const sprite = selectedSprite.value;
+  if (!sprite) {
+    return;
+  }
+
+  if (sprite.palette.length >= 256) {
+    showWarningToast("Palette full", "Sprite palette already has the maximum of 256 colors.");
+    return;
+  }
+
+  sprite.palette.push({ red: 255, green: 255, blue: 255, alpha: 255 });
+  markSpriteAsDirty(sprite);
+  const newIndex = sprite.palette.length - 1;
+  editForegroundPaletteIndex.value = newIndex;
+}
+
+function applySpriteEditorPaint(payload: SpriteEditorPaintPayload): void {
+  const sprite = selectedSprite.value;
+  if (!sprite) {
+    return;
+  }
+
+  const radius = Math.max(0, Math.floor(editStrokeRadius.value) - 1);
+  if (editTool.value === "eraser") {
+    paintSpriteCircle(sprite, payload.x, payload.y, radius, transparentPaletteIndex);
+  } else if (editForegroundPaletteIndex.value === transparentPaletteIndex) {
+    return;
+  } else if (editTool.value === "pencil") {
+    paintSpriteCircle(sprite, payload.x, payload.y, radius, editForegroundPaletteIndex.value);
+  } else {
+    paintSpriteBrush(sprite, payload.x, payload.y, radius, editForegroundPaletteIndex.value);
+  }
+
+  sprite.src = renderIndexedSpriteToDataUri(sprite.width, sprite.height, sprite.palette, sprite.indexes);
+  markSpriteAsDirty(sprite);
+}
+
+function paintSpritePixel(sprite: IndexedSprite, x: number, y: number, paletteIndex: number): void {
+  if (x < 0 || y < 0 || x >= sprite.width || y >= sprite.height) {
+    return;
+  }
+
+  if (paletteIndex !== transparentPaletteIndex && (paletteIndex < 0 || paletteIndex >= sprite.palette.length)) {
+    return;
+  }
+
+  sprite.indexes[y * sprite.width + x] = paletteIndex;
+}
+
+function paintSpriteCircle(sprite: IndexedSprite, centerX: number, centerY: number, radius: number, paletteIndex: number): void {
+  forEachCirclePixel(centerX, centerY, radius, (x, y) => {
+    paintSpritePixel(sprite, x, y, paletteIndex);
+  });
+}
+
+function paintSpriteBrush(sprite: IndexedSprite, centerX: number, centerY: number, radius: number, targetPaletteIndex: number): void {
+  if (targetPaletteIndex === transparentPaletteIndex) {
+    paintSpriteCircle(sprite, centerX, centerY, radius, transparentPaletteIndex);
+    return;
+  }
+
+  const targetColor = sprite.palette[targetPaletteIndex];
+  if (!targetColor) {
+    return;
+  }
+
+  const innerRadius = Math.max(0, radius - 1);
+
+  forEachCirclePixel(centerX, centerY, radius, (x, y, distance) => {
+    const pixelOffset = y * sprite.width + x;
+    const existingPaletteIndex = sprite.indexes[pixelOffset] ?? transparentPaletteIndex;
+
+    if (distance <= innerRadius || radius <= innerRadius) {
+      paintSpritePixel(sprite, x, y, targetPaletteIndex);
+      return;
+    }
+
+    const edgeRatio = (distance - innerRadius) / Math.max(1e-6, radius - innerRadius);
+    const clampedEdgeRatio = clamp(edgeRatio, 0, 1);
+    const existingColor =
+      existingPaletteIndex === transparentPaletteIndex ? targetColor : (sprite.palette[existingPaletteIndex] ?? targetColor);
+    const blendedColor = interpolateColor(targetColor, existingColor, clampedEdgeRatio);
+    const blendedPaletteIndex = findNearestPaletteIndex(sprite.palette, blendedColor);
+    paintSpritePixel(sprite, x, y, blendedPaletteIndex);
+  });
+}
+
+function forEachCirclePixel(
+  centerX: number,
+  centerY: number,
+  radius: number,
+  callback: (x: number, y: number, distance: number) => void,
+): void {
+  const radiusSquared = radius * radius;
+
+  for (let offsetY = -radius; offsetY <= radius; offsetY += 1) {
+    for (let offsetX = -radius; offsetX <= radius; offsetX += 1) {
+      const distanceSquared = offsetX * offsetX + offsetY * offsetY;
+      if (distanceSquared > radiusSquared) {
+        continue;
+      }
+
+      callback(centerX + offsetX, centerY + offsetY, Math.sqrt(distanceSquared));
+    }
+  }
+}
+
+function findNearestPaletteIndex(palette: RgbaColor[], color: RgbaColor): number {
+  if (palette.length === 0) {
+    return transparentPaletteIndex;
+  }
+
+  let nearestIndex = 0;
+  let nearestDistance = Number.POSITIVE_INFINITY;
+
+  palette.forEach((paletteColor, index) => {
+    const distance = getColorDistanceSquared(paletteColor, color);
+    if (distance < nearestDistance) {
+      nearestDistance = distance;
+      nearestIndex = index;
+    }
+  });
+
+  return nearestIndex;
 }
 
 function syncPaletteRemapTargets(sprite: IndexedSprite | null): void {
@@ -2876,6 +3117,7 @@ function removeSprite(sprite: IndexedSprite): void {
       <Tabs v-model:value="activeTab" class="main-tabs">
         <TabList>
           <Tab value="extract-sprite">Extract Sprite</Tab>
+          <Tab value="edit-sprite">Edit Sprite</Tab>
           <Tab value="update-palette">Update Palette</Tab>
           <Tab value="resize-palette">Resize Palette</Tab>
         </TabList>
@@ -2995,6 +3237,64 @@ function removeSprite(sprite: IndexedSprite): void {
               :height="selectedSprite?.height ?? 1"
             />
           </section>
+          </TabPanel>
+
+          <TabPanel value="edit-sprite">
+            <section class="edit-sprite-layout">
+              <Panel header="Edit Tools" class="palette-remap-panel">
+                <div v-if="selectedSprite" class="palette-remap-content">
+                  <div class="edit-tool-buttons">
+                    <Button type="button" label="Pencil" :severity="editTool === 'pencil' ? 'primary' : 'secondary'" @click="setEditTool('pencil')" />
+                    <Button type="button" label="Brush" :severity="editTool === 'brush' ? 'primary' : 'secondary'" @click="setEditTool('brush')" />
+                    <Button type="button" label="Eraser" :severity="editTool === 'eraser' ? 'primary' : 'secondary'" @click="setEditTool('eraser')" />
+                  </div>
+
+                  <label class="edit-radius-control">
+                    <span>Radius (Pencil/Brush): {{ editStrokeRadius }}</span>
+                    <input v-model.number="editStrokeRadius" type="range" min="1" max="32" step="1" />
+                  </label>
+
+                  <div class="edit-palette-actions">
+                    <Button type="button" label="Add Color" @click="addSpritePaletteColor" />
+                    <span class="edit-palette-help">Click: select foreground, double click: edit color</span>
+                  </div>
+
+                  <ul class="edit-palette-list" @contextmenu.prevent>
+                    <li v-for="swatch in editPaletteSwatches" :key="swatch.value">
+                      <button
+                        type="button"
+                        class="edit-palette-swatch-button"
+                        :class="{
+                          'is-fg': isSelectedEditPalette(swatch.value),
+                        }"
+                        :aria-label="swatch.label"
+                        @pointerdown="handleEditSwatchPointerDown($event, swatch.value)"
+                        @dblclick="editPaletteColor(swatch.value)"
+                      >
+                        <span class="edit-palette-swatch-chip" :style="{ backgroundColor: swatch.color }" />
+                        <span class="edit-palette-swatch-label">{{ swatch.label }}</span>
+                      </button>
+                    </li>
+                  </ul>
+
+                  <div class="edit-palette-preview-legend">
+                    <span class="edit-palette-legend-mark is-fg" aria-hidden="true" />
+                    <span>Foreground selection</span>
+                  </div>
+                </div>
+                <div v-else class="empty-tab palette-remap-empty">Select a sprite to edit</div>
+              </Panel>
+
+              <SpriteEditor
+                :preview-src="selectedSprite?.src"
+                :indexes="selectedSprite?.indexes ?? []"
+                :palette="selectedSprite ? selectedSprite.palette.map((color) => ({ color: colorToCss(color), label: colorToHex(color) })) : []"
+                :width="selectedSprite?.width ?? 1"
+                :height="selectedSprite?.height ?? 1"
+                :tool="editTool"
+                @paint="applySpriteEditorPaint"
+              />
+            </section>
           </TabPanel>
 
           <TabPanel value="update-palette">
