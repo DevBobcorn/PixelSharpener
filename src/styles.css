@@ -372,13 +372,20 @@ body {
 .edit-tool-buttons,
 .edit-palette-actions {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 0.5rem;
 }
 
 .edit-palette-actions {
   grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
+}
+
+.edit-selection-help {
+  margin: 0;
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: #444;
 }
 
 .edit-radius-control {
@@ -670,6 +677,30 @@ body {
   border: 2px solid #777;
   pointer-events: none;
   z-index: 1;
+}
+
+.sprite-selection-preview-frame {
+  position: absolute;
+  box-sizing: border-box;
+  border: 2px dashed #1d4ed8;
+  background: rgba(59, 130, 246, 0.1);
+  pointer-events: none;
+  z-index: 2;
+}
+
+.sprite-selection-outline {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.sprite-selection-outline-segment {
+  stroke: #1d4ed8;
+  stroke-width: 2;
+  stroke-dasharray: 5 4;
+  stroke-linecap: square;
+  vector-effect: non-scaling-stroke;
 }
 
 .source-image-transform-layer {

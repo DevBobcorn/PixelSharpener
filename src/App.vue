@@ -125,7 +125,7 @@ type ColorCluster = {
 type SourceImagePointerMode = "pan" | "draw-selection" | "drag-selection-point";
 type MergeMethod = "by-distance" | "by-color-count";
 type ResizePaletteMode = "reduce" | "interpolate";
-type EditTool = "pencil" | "brush" | "eraser";
+type EditTool = "pencil" | "brush" | "eraser" | "selection";
 type SpriteContextMenuAction =
   | "undo"
   | "redo"
@@ -1153,6 +1153,7 @@ function getPaintStrokeOperationName(): string {
     pencil: "Pencil",
     brush: "Brush",
     eraser: "Eraser",
+    selection: "Selection",
   };
 
   return `Paint Stroke (${toolLabelByType[editTool.value]})`;
@@ -3676,12 +3677,20 @@ function removeSprite(sprite: IndexedSprite): void {
                     <Button type="button" label="Pencil" :severity="editTool === 'pencil' ? 'primary' : 'secondary'" @click="setEditTool('pencil')" />
                     <Button type="button" label="Brush" :severity="editTool === 'brush' ? 'primary' : 'secondary'" @click="setEditTool('brush')" />
                     <Button type="button" label="Eraser" :severity="editTool === 'eraser' ? 'primary' : 'secondary'" @click="setEditTool('eraser')" />
+                    <Button
+                      type="button"
+                      label="Selection"
+                      :severity="editTool === 'selection' ? 'primary' : 'secondary'"
+                      @click="setEditTool('selection')"
+                    />
                   </div>
 
-                  <label class="edit-radius-control">
+                  <label v-if="editTool !== 'selection'" class="edit-radius-control">
                     <span>Radius (Pencil/Brush): {{ editStrokeRadius }}</span>
                     <input v-model.number="editStrokeRadius" type="range" min="1" max="32" step="1" />
                   </label>
+
+                  <p v-else class="edit-selection-help">Drag to select rectangle. Shift adds to selection. Ctrl removes from selection.</p>
 
                   <div class="edit-palette-actions">
                     <Button type="button" label="Add Color" @click="addSpritePaletteColor" />
