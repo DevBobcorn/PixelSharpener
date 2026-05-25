@@ -412,7 +412,7 @@ const selectedSpriteHistoryTimeline = computed<SpriteHistoryTimelineEntry[]>(() 
   entries.push({
     timelineIndex: currentIndex,
     kind: "current",
-    label: `Current: ${sprite.undoStack[sprite.undoStack.length - 1]?.operationName ?? "Current State"}`,
+    label: "Current",
   });
 
   [...sprite.redoStack].reverse().forEach((entry, redoOffset) => {
@@ -1085,7 +1085,7 @@ function applySpriteEditorPaint(payload: SpriteEditorPaintPayload): void {
     return;
   }
 
-  commitSpriteMutation(sprite, "Paint Stroke", () => {
+  commitSpriteMutation(sprite, getPaintStrokeOperationName(), () => {
     mutateSpriteByPaintPayload(sprite, payload);
   });
 }
@@ -1121,7 +1121,7 @@ function finalizeActiveEditStroke(): void {
     return;
   }
 
-  sprite.undoStack.push(createSpriteHistoryEntry(snapshot, "Paint Stroke"));
+  sprite.undoStack.push(createSpriteHistoryEntry(snapshot, getPaintStrokeOperationName()));
   sprite.redoStack = [];
   markSpriteAsDirty(sprite);
 }
@@ -1143,6 +1143,16 @@ function mutateSpriteByPaintPayload(sprite: IndexedSprite, payload: SpriteEditor
   }
 
   paintSpriteBrush(sprite, payload.x, payload.y, radius, editForegroundPaletteIndex.value);
+}
+
+function getPaintStrokeOperationName(): string {
+  const toolLabelByType: Record<EditTool, string> = {
+    pencil: "Pencil",
+    brush: "Brush",
+    eraser: "Eraser",
+  };
+
+  return `Paint Stroke (${toolLabelByType[editTool.value]})`;
 }
 
 function paintSpritePixel(sprite: IndexedSprite, x: number, y: number, paletteIndex: number): void {
