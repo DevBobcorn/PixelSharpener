@@ -42,6 +42,8 @@ type IndexedSprite = {
 };
 
 type SpriteSnapshot = {
+  width: number;
+  height: number;
   palette: RgbaColor[];
   indexes: number[];
 };
@@ -127,6 +129,7 @@ type EditTool = "pencil" | "brush" | "eraser";
 type SpriteContextMenuAction =
   | "undo"
   | "redo"
+  | "reload"
   | "sort-palette-by-brightness"
   | "save"
   | "save-as"
@@ -3117,7 +3120,9 @@ async function reloadSpriteFromSourcePath(sprite: IndexedSprite): Promise<void> 
 
   try {
     const reloadedSprite = await pathToIndexedSprite(path);
-    applyReloadedSpriteData(sprite, reloadedSprite);
+    commitSpriteMutation(sprite, "Reload From Source", () => {
+      applyReloadedSpriteData(sprite, reloadedSprite);
+    });
     markSpriteAsClean(sprite);
 
     if (selectedSprite.value?.id === sprite.id) {
@@ -3331,6 +3336,8 @@ function commitSpriteMutation(sprite: IndexedSprite, operationName: string, muta
 }
 
 function applySpriteSnapshot(sprite: IndexedSprite, snapshot: SpriteSnapshot): void {
+  sprite.width = snapshot.width;
+  sprite.height = snapshot.height;
   sprite.palette = snapshot.palette.map(cloneColor);
   sprite.indexes = [...snapshot.indexes];
   sprite.src = renderIndexedSpriteToDataUri(sprite.width, sprite.height, sprite.palette, sprite.indexes);
@@ -3338,6 +3345,8 @@ function applySpriteSnapshot(sprite: IndexedSprite, snapshot: SpriteSnapshot): v
 
 function createSpriteSnapshot(sprite: IndexedSprite): SpriteSnapshot {
   return {
+    width: sprite.width,
+    height: sprite.height,
     palette: sprite.palette.map(cloneColor),
     indexes: [...sprite.indexes],
   };
@@ -3351,6 +3360,10 @@ function createSpriteHistoryEntry(snapshot: SpriteSnapshot, operationName: strin
 }
 
 function hasSpriteChanged(sprite: IndexedSprite, snapshot: SpriteSnapshot): boolean {
+  if (sprite.width !== snapshot.width || sprite.height !== snapshot.height) {
+    return true;
+  }
+
   if (sprite.indexes.length !== snapshot.indexes.length || sprite.palette.length !== snapshot.palette.length) {
     return true;
   }
