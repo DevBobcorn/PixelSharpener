@@ -37,13 +37,18 @@ type IndexedSprite = {
   height: number;
   palette: RgbaColor[];
   indexes: number[];
-  undoStack: SpriteSnapshot[];
-  redoStack: SpriteSnapshot[];
+  undoStack: SpriteHistoryEntry[];
+  redoStack: SpriteHistoryEntry[];
 };
 
 type SpriteSnapshot = {
   palette: RgbaColor[];
   indexes: number[];
+};
+
+type SpriteHistoryEntry = {
+  snapshot: SpriteSnapshot;
+  operationName: string;
 };
 
 type SpriteHistoryTimelineEntry = {
@@ -176,6 +181,8 @@ const resizeInterpolateSmoothIncludeDiagonalNeighbors = ref(false);
 const editTool = ref<EditTool>("pencil");
 const editStrokeRadius = ref(1);
 const editForegroundPaletteIndex = ref(0);
+const activeEditStrokeSnapshot = ref<SpriteSnapshot | null>(null);
+const activeEditStrokeSpriteId = ref<number | null>(null);
 const paletteRemapTargets = ref<RgbaColor[]>([]);
 const dedupeRemappedColors = ref(true);
 const showRemapPreview = ref(false);
@@ -396,23 +403,23 @@ const selectedSpriteHistoryTimeline = computed<SpriteHistoryTimelineEntry[]>(() 
   }
 
   const currentIndex = sprite.undoStack.length;
-  const entries: SpriteHistoryTimelineEntry[] = sprite.undoStack.map((_, timelineIndex) => ({
+  const entries: SpriteHistoryTimelineEntry[] = sprite.undoStack.map((entry, timelineIndex) => ({
     timelineIndex,
     kind: "undo",
-    label: `Undo ${currentIndex - timelineIndex}`,
+    label: `Undo ${currentIndex - timelineIndex}: ${entry.operationName}`,
   }));
 
   entries.push({
     timelineIndex: currentIndex,
     kind: "current",
-    label: "Current",
+    label: `Current: ${sprite.undoStack[sprite.undoStack.length - 1]?.operationName ?? "Current State"}`,
   });
 
-  [...sprite.redoStack].reverse().forEach((_, redoOffset) => {
+  [...sprite.redoStack].reverse().forEach((entry, redoOffset) => {
     entries.push({
       timelineIndex: currentIndex + redoOffset + 1,
       kind: "redo",
-      label: `Redo ${redoOffset + 1}`,
+      label: `Redo ${redoOffset + 1}: ${entry.operationName}`,
     });
   });
 
@@ -434,6 +441,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  finalizeActiveEditStroke();
   window.removeEventListener("contextmenu", preventDefaultContextMenu);
   window.removeEventListener("click", closeSpriteContextMenu);
   window.removeEventListener("keydown", closeSpriteContextMenuOnEscape);
@@ -449,6 +457,13 @@ watch(
     syncEditorPaletteSelection(selectedSprite.value);
   },
   { immediate: true },
+);
+
+watch(
+  () => selectedSprite.value?.id ?? null,
+  () => {
+    finalizeActiveEditStroke();
+  },
 );
 
 function colorToCss(color: RgbaColor): string {
@@ -1006,7 +1021,7 @@ function editPaletteColor(index: number): void {
         return;
       }
 
-      commitSpriteMutation(sprite, () => {
+      commitSpriteMutation(sprite, "Edit Palette Color", () => {
         color.red = rgb.red;
         color.green = rgb.green;
         color.blue = rgb.blue;
@@ -1046,7 +1061,7 @@ function addSpritePaletteColor(): void {
   }
 
   let newIndex = -1;
-  commitSpriteMutation(sprite, () => {
+  commitSpriteMutation(sprite, "Add Palette Color", () => {
     sprite.palette.push({ red: 255, green: 255, blue: 255, alpha: 255 });
     newIndex = sprite.palette.length - 1;
   });
@@ -1063,24 +1078,71 @@ function applySpriteEditorPaint(payload: SpriteEditorPaintPayload): void {
     return;
   }
 
-  commitSpriteMutation(sprite, () => {
-    const radius = Math.max(0, Math.floor(editStrokeRadius.value) - 1);
-    if (editTool.value === "eraser") {
-      paintSpriteCircle(sprite, payload.x, payload.y, radius, transparentPaletteIndex);
-      return;
-    }
+  if (activeEditStrokeSpriteId.value === sprite.id && activeEditStrokeSnapshot.value) {
+    mutateSpriteByPaintPayload(sprite, payload);
+    sprite.src = renderIndexedSpriteToDataUri(sprite.width, sprite.height, sprite.palette, sprite.indexes);
+    markSpriteAsDirty(sprite);
+    return;
+  }
 
-    if (editForegroundPaletteIndex.value === transparentPaletteIndex) {
-      return;
-    }
-
-    if (editTool.value === "pencil") {
-      paintSpriteCircle(sprite, payload.x, payload.y, radius, editForegroundPaletteIndex.value);
-      return;
-    }
-
-    paintSpriteBrush(sprite, payload.x, payload.y, radius, editForegroundPaletteIndex.value);
+  commitSpriteMutation(sprite, "Paint Stroke", () => {
+    mutateSpriteByPaintPayload(sprite, payload);
   });
+}
+
+function startSpriteEditStroke(): void {
+  finalizeActiveEditStroke();
+
+  const sprite = selectedSprite.value;
+  if (!sprite) {
+    return;
+  }
+
+  activeEditStrokeSnapshot.value = createSpriteSnapshot(sprite);
+  activeEditStrokeSpriteId.value = sprite.id;
+}
+
+function endSpriteEditStroke(): void {
+  finalizeActiveEditStroke();
+}
+
+function finalizeActiveEditStroke(): void {
+  const spriteId = activeEditStrokeSpriteId.value;
+  const snapshot = activeEditStrokeSnapshot.value;
+  activeEditStrokeSpriteId.value = null;
+  activeEditStrokeSnapshot.value = null;
+
+  if (spriteId === null || !snapshot) {
+    return;
+  }
+
+  const sprite = openedSprites.value.find((item) => item.id === spriteId);
+  if (!sprite || !hasSpriteChanged(sprite, snapshot)) {
+    return;
+  }
+
+  sprite.undoStack.push(createSpriteHistoryEntry(snapshot, "Paint Stroke"));
+  sprite.redoStack = [];
+  markSpriteAsDirty(sprite);
+}
+
+function mutateSpriteByPaintPayload(sprite: IndexedSprite, payload: SpriteEditorPaintPayload): void {
+  const radius = Math.max(0, Math.floor(editStrokeRadius.value) - 1);
+  if (editTool.value === "eraser") {
+    paintSpriteCircle(sprite, payload.x, payload.y, radius, transparentPaletteIndex);
+    return;
+  }
+
+  if (editForegroundPaletteIndex.value === transparentPaletteIndex) {
+    return;
+  }
+
+  if (editTool.value === "pencil") {
+    paintSpriteCircle(sprite, payload.x, payload.y, radius, editForegroundPaletteIndex.value);
+    return;
+  }
+
+  paintSpriteBrush(sprite, payload.x, payload.y, radius, editForegroundPaletteIndex.value);
 }
 
 function paintSpritePixel(sprite: IndexedSprite, x: number, y: number, paletteIndex: number): void {
@@ -1247,7 +1309,7 @@ function resizeSelectedSpritePalette(): void {
       resizeInterpolateAutoSmooth.value,
       getResizeInterpolateAutoSmoothSettings(),
     );
-    commitSpriteMutation(sprite, () => {
+    commitSpriteMutation(sprite, "Resize Palette (Interpolate)", () => {
       sprite.palette = interpolatedData.palette;
       sprite.indexes = interpolatedData.indexes;
     });
@@ -1255,7 +1317,7 @@ function resizeSelectedSpritePalette(): void {
   }
 
   const reducedData = reduceIndexedSpritePalette(sprite);
-  commitSpriteMutation(sprite, () => {
+  commitSpriteMutation(sprite, "Resize Palette (Reduce)", () => {
     sprite.palette = reducedData.palette;
     sprite.indexes = reducedData.indexes;
   });
@@ -1705,7 +1767,7 @@ function createRemappedSprite(sprite: IndexedSprite, targets: RgbaColor[]): Inde
 
 function applyPaletteRemapToSprite(sprite: IndexedSprite, targets: RgbaColor[]): void {
   const { palette, indexes } = remapSpritePalette(sprite, targets, dedupeRemappedColors.value);
-  commitSpriteMutation(sprite, () => {
+  commitSpriteMutation(sprite, "Remap Palette", () => {
     sprite.palette = palette;
     sprite.indexes = indexes;
   });
@@ -3125,13 +3187,13 @@ function canRedoSprite(sprite: IndexedSprite): boolean {
 }
 
 function undoSprite(sprite: IndexedSprite, options: { closeMenu?: boolean } = {}): boolean {
-  const previous = sprite.undoStack.pop();
-  if (!previous) {
+  const previousEntry = sprite.undoStack.pop();
+  if (!previousEntry) {
     return false;
   }
 
-  sprite.redoStack.push(createSpriteSnapshot(sprite));
-  applySpriteSnapshot(sprite, previous);
+  sprite.redoStack.push(createSpriteHistoryEntry(createSpriteSnapshot(sprite), previousEntry.operationName));
+  applySpriteSnapshot(sprite, previousEntry.snapshot);
   markSpriteAsDirty(sprite);
   if (options.closeMenu ?? true) {
     closeSpriteContextMenu();
@@ -3141,13 +3203,13 @@ function undoSprite(sprite: IndexedSprite, options: { closeMenu?: boolean } = {}
 }
 
 function redoSprite(sprite: IndexedSprite, options: { closeMenu?: boolean } = {}): boolean {
-  const next = sprite.redoStack.pop();
-  if (!next) {
+  const nextEntry = sprite.redoStack.pop();
+  if (!nextEntry) {
     return false;
   }
 
-  sprite.undoStack.push(createSpriteSnapshot(sprite));
-  applySpriteSnapshot(sprite, next);
+  sprite.undoStack.push(createSpriteHistoryEntry(createSpriteSnapshot(sprite), nextEntry.operationName));
+  applySpriteSnapshot(sprite, nextEntry.snapshot);
   markSpriteAsDirty(sprite);
   if (options.closeMenu ?? true) {
     closeSpriteContextMenu();
@@ -3185,7 +3247,7 @@ function jumpSpriteToTimelineIndex(sprite: IndexedSprite, timelineIndex: number)
   }
 }
 
-function commitSpriteMutation(sprite: IndexedSprite, mutate: () => void): void {
+function commitSpriteMutation(sprite: IndexedSprite, operationName: string, mutate: () => void): void {
   const previous = createSpriteSnapshot(sprite);
   mutate();
 
@@ -3193,7 +3255,7 @@ function commitSpriteMutation(sprite: IndexedSprite, mutate: () => void): void {
     return;
   }
 
-  sprite.undoStack.push(previous);
+  sprite.undoStack.push(createSpriteHistoryEntry(previous, operationName));
   sprite.redoStack = [];
   sprite.src = renderIndexedSpriteToDataUri(sprite.width, sprite.height, sprite.palette, sprite.indexes);
   markSpriteAsDirty(sprite);
@@ -3209,6 +3271,13 @@ function createSpriteSnapshot(sprite: IndexedSprite): SpriteSnapshot {
   return {
     palette: sprite.palette.map(cloneColor),
     indexes: [...sprite.indexes],
+  };
+}
+
+function createSpriteHistoryEntry(snapshot: SpriteSnapshot, operationName: string): SpriteHistoryEntry {
+  return {
+    snapshot,
+    operationName,
   };
 }
 
@@ -3271,7 +3340,7 @@ function isRunningInTauri(): boolean {
 }
 
 function sortSpritePaletteByBrightness(sprite: IndexedSprite): void {
-  commitSpriteMutation(sprite, () => {
+  commitSpriteMutation(sprite, "Sort Palette by Brightness", () => {
     const paletteEntries = sprite.palette.map((color, index) => ({
       color,
       index,
@@ -3299,6 +3368,8 @@ function getColorBrightness(color: RgbaColor): number {
 }
 
 function removeSprite(sprite: IndexedSprite): void {
+  finalizeActiveEditStroke();
+
   const spriteIndex = openedSprites.value.findIndex((item) => item.id === sprite.id);
   if (spriteIndex === -1) {
     return;
@@ -3560,7 +3631,9 @@ function removeSprite(sprite: IndexedSprite): void {
                 :width="selectedSprite?.width ?? 1"
                 :height="selectedSprite?.height ?? 1"
                 :tool="editTool"
+                @paint-start="startSpriteEditStroke"
                 @paint="applySpriteEditorPaint"
+                @paint-end="endSpriteEditStroke"
               />
             </section>
           </TabPanel>

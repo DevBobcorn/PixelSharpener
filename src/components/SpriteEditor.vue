@@ -24,7 +24,9 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
+  paintStart: [];
   paint: [payload: PaintPayload];
+  paintEnd: [];
 }>();
 
 const editorViewportElement = ref<HTMLElement | null>(null);
@@ -78,6 +80,11 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  if (isPainting.value) {
+    emit("paintEnd");
+    isPainting.value = false;
+  }
+
   resizeObserver?.disconnect();
 });
 
@@ -137,6 +144,7 @@ function startPaint(event: PointerEvent): void {
   event.preventDefault();
   viewport.setPointerCapture(event.pointerId);
   isPainting.value = true;
+  emit("paintStart");
   updateHoveredPixel(event);
   paintFromEvent(event);
 }
@@ -158,7 +166,12 @@ function stopPaint(event: PointerEvent): void {
     viewport.releasePointerCapture(event.pointerId);
   }
 
+  if (!isPainting.value) {
+    return;
+  }
+
   isPainting.value = false;
+  emit("paintEnd");
 }
 
 function clearHoveredPixel(): void {
