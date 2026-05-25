@@ -37,6 +37,13 @@ type IndexedSprite = {
   height: number;
   palette: RgbaColor[];
   indexes: number[];
+  undoStack: SpriteSnapshot[];
+  redoStack: SpriteSnapshot[];
+};
+
+type SpriteSnapshot = {
+  palette: RgbaColor[];
+  indexes: number[];
 };
 
 type SpriteContextMenu = {
@@ -106,7 +113,14 @@ type SourceImagePointerMode = "pan" | "draw-selection" | "drag-selection-point";
 type MergeMethod = "by-distance" | "by-color-count";
 type ResizePaletteMode = "reduce" | "interpolate";
 type EditTool = "pencil" | "brush" | "eraser";
-type SpriteContextMenuAction = "sort-palette-by-brightness" | "save" | "save-as" | "save-palette" | "remove";
+type SpriteContextMenuAction =
+  | "undo"
+  | "redo"
+  | "sort-palette-by-brightness"
+  | "save"
+  | "save-as"
+  | "save-palette"
+  | "remove";
 
 type SpriteEditorPaintPayload = {
   x: number;
@@ -195,6 +209,8 @@ const isDetachedSpriteContextMenu = window.location.hash.startsWith("#sprite-con
 const detachedSpriteContextMenuParams = new URLSearchParams(window.location.hash.split("?")[1] ?? "");
 const detachedSpriteContextMenuSpriteId = Number.parseInt(detachedSpriteContextMenuParams.get("spriteId") ?? "", 10);
 const detachedSpriteContextMenuCanSaveToSource = detachedSpriteContextMenuParams.get("canSaveToSource") === "1";
+const detachedSpriteContextMenuCanUndo = detachedSpriteContextMenuParams.get("canUndo") === "1";
+const detachedSpriteContextMenuCanRedo = detachedSpriteContextMenuParams.get("canRedo") === "1";
 
 const sourceImageTransformStyle = computed(() => ({
   height: sourceImage.value ? `${sourceImage.value.height * sourceImageZoom.value}px` : undefined,
@@ -954,11 +970,11 @@ function editPaletteColor(index: number): void {
         return;
       }
 
-      color.red = rgb.red;
-      color.green = rgb.green;
-      color.blue = rgb.blue;
-      sprite.src = renderIndexedSpriteToDataUri(sprite.width, sprite.height, sprite.palette, sprite.indexes);
-      markSpriteAsDirty(sprite);
+      commitSpriteMutation(sprite, () => {
+        color.red = rgb.red;
+        color.green = rgb.green;
+        color.blue = rgb.blue;
+      });
     },
     { once: true },
   );
@@ -993,9 +1009,15 @@ function addSpritePaletteColor(): void {
     return;
   }
 
-  sprite.palette.push({ red: 255, green: 255, blue: 255, alpha: 255 });
-  markSpriteAsDirty(sprite);
-  const newIndex = sprite.palette.length - 1;
+  let newIndex = -1;
+  commitSpriteMutation(sprite, () => {
+    sprite.palette.push({ red: 255, green: 255, blue: 255, alpha: 255 });
+    newIndex = sprite.palette.length - 1;
+  });
+  if (newIndex === -1) {
+    return;
+  }
+
   editForegroundPaletteIndex.value = newIndex;
 }
 
@@ -1005,19 +1027,24 @@ function applySpriteEditorPaint(payload: SpriteEditorPaintPayload): void {
     return;
   }
 
-  const radius = Math.max(0, Math.floor(editStrokeRadius.value) - 1);
-  if (editTool.value === "eraser") {
-    paintSpriteCircle(sprite, payload.x, payload.y, radius, transparentPaletteIndex);
-  } else if (editForegroundPaletteIndex.value === transparentPaletteIndex) {
-    return;
-  } else if (editTool.value === "pencil") {
-    paintSpriteCircle(sprite, payload.x, payload.y, radius, editForegroundPaletteIndex.value);
-  } else {
-    paintSpriteBrush(sprite, payload.x, payload.y, radius, editForegroundPaletteIndex.value);
-  }
+  commitSpriteMutation(sprite, () => {
+    const radius = Math.max(0, Math.floor(editStrokeRadius.value) - 1);
+    if (editTool.value === "eraser") {
+      paintSpriteCircle(sprite, payload.x, payload.y, radius, transparentPaletteIndex);
+      return;
+    }
 
-  sprite.src = renderIndexedSpriteToDataUri(sprite.width, sprite.height, sprite.palette, sprite.indexes);
-  markSpriteAsDirty(sprite);
+    if (editForegroundPaletteIndex.value === transparentPaletteIndex) {
+      return;
+    }
+
+    if (editTool.value === "pencil") {
+      paintSpriteCircle(sprite, payload.x, payload.y, radius, editForegroundPaletteIndex.value);
+      return;
+    }
+
+    paintSpriteBrush(sprite, payload.x, payload.y, radius, editForegroundPaletteIndex.value);
+  });
 }
 
 function paintSpritePixel(sprite: IndexedSprite, x: number, y: number, paletteIndex: number): void {
@@ -1184,18 +1211,18 @@ function resizeSelectedSpritePalette(): void {
       resizeInterpolateAutoSmooth.value,
       getResizeInterpolateAutoSmoothSettings(),
     );
-    sprite.palette = interpolatedData.palette;
-    sprite.indexes = interpolatedData.indexes;
-    sprite.src = renderIndexedSpriteToDataUri(sprite.width, sprite.height, sprite.palette, sprite.indexes);
-    markSpriteAsDirty(sprite);
+    commitSpriteMutation(sprite, () => {
+      sprite.palette = interpolatedData.palette;
+      sprite.indexes = interpolatedData.indexes;
+    });
     return;
   }
 
   const reducedData = reduceIndexedSpritePalette(sprite);
-  sprite.palette = reducedData.palette;
-  sprite.indexes = reducedData.indexes;
-  sprite.src = renderIndexedSpriteToDataUri(sprite.width, sprite.height, sprite.palette, sprite.indexes);
-  markSpriteAsDirty(sprite);
+  commitSpriteMutation(sprite, () => {
+    sprite.palette = reducedData.palette;
+    sprite.indexes = reducedData.indexes;
+  });
 }
 
 function resizeSelectedSpritePaletteToNew(): void {
@@ -1220,6 +1247,8 @@ function resizeSelectedSpritePaletteToNew(): void {
       palette: interpolatedData.palette,
       indexes: interpolatedData.indexes,
       src: renderIndexedSpriteToDataUri(sprite.width, sprite.height, interpolatedData.palette, interpolatedData.indexes),
+      undoStack: [],
+      redoStack: [],
     };
     openedSprites.value.push(interpolatedSprite);
     selectedSprite.value = interpolatedSprite;
@@ -1235,6 +1264,8 @@ function resizeSelectedSpritePaletteToNew(): void {
     palette: reducedData.palette,
     indexes: reducedData.indexes,
     src: renderIndexedSpriteToDataUri(sprite.width, sprite.height, reducedData.palette, reducedData.indexes),
+    undoStack: [],
+    redoStack: [],
   };
   openedSprites.value.push(reducedSprite);
   selectedSprite.value = reducedSprite;
@@ -1631,15 +1662,17 @@ function createRemappedSprite(sprite: IndexedSprite, targets: RgbaColor[]): Inde
     palette,
     indexes,
     src: renderIndexedSpriteToDataUri(sprite.width, sprite.height, palette, indexes),
+    undoStack: [],
+    redoStack: [],
   };
 }
 
 function applyPaletteRemapToSprite(sprite: IndexedSprite, targets: RgbaColor[]): void {
   const { palette, indexes } = remapSpritePalette(sprite, targets, dedupeRemappedColors.value);
-  sprite.palette = palette;
-  sprite.indexes = indexes;
-  sprite.src = renderIndexedSpriteToDataUri(sprite.width, sprite.height, palette, indexes);
-  markSpriteAsDirty(sprite);
+  commitSpriteMutation(sprite, () => {
+    sprite.palette = palette;
+    sprite.indexes = indexes;
+  });
 }
 
 function remapSpritePalette(
@@ -1820,6 +1853,8 @@ async function fileToIndexedSprite(file: File): Promise<IndexedSprite> {
     palette,
     indexes,
     src: renderIndexedSpriteToDataUri(canvas.width, canvas.height, palette, indexes),
+    undoStack: [],
+    redoStack: [],
   };
 }
 
@@ -1888,6 +1923,8 @@ async function fileToIndexedPngSprite(file: File): Promise<IndexedSprite | null>
     palette,
     indexes,
     src: renderIndexedSpriteToDataUri(width, height, palette, indexes),
+    undoStack: [],
+    redoStack: [],
   };
 }
 
@@ -2069,6 +2106,8 @@ function createIndexedSpriteFromColors(
     palette,
     indexes,
     src: renderIndexedSpriteToDataUri(width, height, palette, indexes),
+    undoStack: [],
+    redoStack: [],
   };
 }
 
@@ -2665,12 +2704,14 @@ async function openSpriteContextMenu(event: MouseEvent, sprite: IndexedSprite): 
 async function openDetachedSpriteContextMenu(event: MouseEvent, sprite: IndexedSprite): Promise<void> {
   await closeDetachedSpriteContextMenuWindow();
   const canSaveToSource = canSaveSpriteToSource(sprite);
+  const canUndo = canUndoSprite(sprite);
+  const canRedo = canRedoSprite(sprite);
   const menuWidth = getDetachedSpriteContextMenuWidth(canSaveToSource);
   const menuHeight = getDetachedSpriteContextMenuHeight(canSaveToSource);
   const menuPosition = getDetachedSpriteContextMenuPosition(event, menuWidth, menuHeight);
 
   const menuWindow = new WebviewWindow(spriteContextMenuWindowLabel, {
-    url: `/#sprite-context-menu?spriteId=${sprite.id}&canSaveToSource=${canSaveToSource ? "1" : "0"}`,
+    url: `/#sprite-context-menu?spriteId=${sprite.id}&canSaveToSource=${canSaveToSource ? "1" : "0"}&canUndo=${canUndo ? "1" : "0"}&canRedo=${canRedo ? "1" : "0"}`,
     title: "Sprite Menu",
     x: menuPosition.x,
     y: menuPosition.y,
@@ -2693,12 +2734,14 @@ async function openDetachedSpriteContextMenu(event: MouseEvent, sprite: IndexedS
 }
 
 function getDetachedSpriteContextMenuHeight(canSaveToSource: boolean): number {
-  const actionCount = canSaveToSource ? 5 : 4;
+  const actionCount = canSaveToSource ? 7 : 6;
   return actionCount * spriteContextMenuActionHeight + spriteContextMenuWindowVerticalPadding;
 }
 
 function getDetachedSpriteContextMenuWidth(canSaveToSource: boolean): number {
   const labels = [
+    "Undo",
+    "Redo",
     "Sort Palette by Brightness",
     ...(canSaveToSource ? ["Save"] : []),
     "Save as",
@@ -2799,6 +2842,16 @@ async function handleSpriteContextMenuAction(payload: SpriteContextMenuActionPay
     return;
   }
 
+  if (payload.action === "undo") {
+    undoSprite(sprite);
+    return;
+  }
+
+  if (payload.action === "redo") {
+    redoSprite(sprite);
+    return;
+  }
+
   if (payload.action === "sort-palette-by-brightness") {
     sortSpritePaletteByBrightness(sprite);
     return;
@@ -2835,7 +2888,44 @@ function closeSpriteContextMenuOnEscape(event: KeyboardEvent): void {
     }
 
     closeSpriteContextMenu();
+    return;
   }
+
+  if (isDetachedSpriteContextMenu || isEditableKeyboardTarget(event.target)) {
+    return;
+  }
+
+  const sprite = selectedSprite.value;
+  if (!sprite || event.altKey) {
+    return;
+  }
+
+  const isUndoShortcut = (event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === "z";
+  if (isUndoShortcut && canUndoSprite(sprite)) {
+    event.preventDefault();
+    undoSprite(sprite);
+    return;
+  }
+
+  const isRedoByY = (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "y";
+  const isRedoByShiftZ = (event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "z";
+  if ((isRedoByY || isRedoByShiftZ) && canRedoSprite(sprite)) {
+    event.preventDefault();
+    redoSprite(sprite);
+  }
+}
+
+function isEditableKeyboardTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+
+  const editableTag = target.closest("input, textarea, select");
+  if (editableTag) {
+    return true;
+  }
+
+  return target.isContentEditable || Boolean(target.closest("[contenteditable='true']"));
 }
 
 async function closeCurrentDetachedSpriteContextMenu(): Promise<void> {
@@ -2922,6 +3012,8 @@ async function saveSpritePaletteAsIndexedPng(sprite: IndexedSprite): Promise<voi
       palette: opaquePalette,
       indexes: opaquePalette.map((_, index) => index),
       src: "",
+      undoStack: [],
+      redoStack: [],
     };
     const png = createIndexedPng(paletteSprite);
 
@@ -2988,6 +3080,92 @@ function markSpriteAsClean(sprite: IndexedSprite): void {
   }
 }
 
+function canUndoSprite(sprite: IndexedSprite): boolean {
+  return sprite.undoStack.length > 0;
+}
+
+function canRedoSprite(sprite: IndexedSprite): boolean {
+  return sprite.redoStack.length > 0;
+}
+
+function undoSprite(sprite: IndexedSprite): void {
+  const previous = sprite.undoStack.pop();
+  if (!previous) {
+    return;
+  }
+
+  sprite.redoStack.push(createSpriteSnapshot(sprite));
+  applySpriteSnapshot(sprite, previous);
+  markSpriteAsDirty(sprite);
+  closeSpriteContextMenu();
+}
+
+function redoSprite(sprite: IndexedSprite): void {
+  const next = sprite.redoStack.pop();
+  if (!next) {
+    return;
+  }
+
+  sprite.undoStack.push(createSpriteSnapshot(sprite));
+  applySpriteSnapshot(sprite, next);
+  markSpriteAsDirty(sprite);
+  closeSpriteContextMenu();
+}
+
+function commitSpriteMutation(sprite: IndexedSprite, mutate: () => void): void {
+  const previous = createSpriteSnapshot(sprite);
+  mutate();
+
+  if (!hasSpriteChanged(sprite, previous)) {
+    return;
+  }
+
+  sprite.undoStack.push(previous);
+  sprite.redoStack = [];
+  sprite.src = renderIndexedSpriteToDataUri(sprite.width, sprite.height, sprite.palette, sprite.indexes);
+  markSpriteAsDirty(sprite);
+}
+
+function applySpriteSnapshot(sprite: IndexedSprite, snapshot: SpriteSnapshot): void {
+  sprite.palette = snapshot.palette.map(cloneColor);
+  sprite.indexes = [...snapshot.indexes];
+  sprite.src = renderIndexedSpriteToDataUri(sprite.width, sprite.height, sprite.palette, sprite.indexes);
+}
+
+function createSpriteSnapshot(sprite: IndexedSprite): SpriteSnapshot {
+  return {
+    palette: sprite.palette.map(cloneColor),
+    indexes: [...sprite.indexes],
+  };
+}
+
+function hasSpriteChanged(sprite: IndexedSprite, snapshot: SpriteSnapshot): boolean {
+  if (sprite.indexes.length !== snapshot.indexes.length || sprite.palette.length !== snapshot.palette.length) {
+    return true;
+  }
+
+  for (let index = 0; index < sprite.indexes.length; index += 1) {
+    if (sprite.indexes[index] !== snapshot.indexes[index]) {
+      return true;
+    }
+  }
+
+  for (let index = 0; index < sprite.palette.length; index += 1) {
+    const currentColor = sprite.palette[index];
+    const previousColor = snapshot.palette[index];
+    if (
+      currentColor.red !== previousColor.red ||
+      currentColor.green !== previousColor.green ||
+      currentColor.blue !== previousColor.blue ||
+      currentColor.alpha !== previousColor.alpha
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function getSpriteSourceIndicatorIcon(sprite: IndexedSprite): string {
   return sprite.sourceFileDirty ? "pi-exclamation-circle" : "pi-check-circle";
 }
@@ -3020,26 +3198,26 @@ function isRunningInTauri(): boolean {
 }
 
 function sortSpritePaletteByBrightness(sprite: IndexedSprite): void {
-  const paletteEntries = sprite.palette.map((color, index) => ({
-    color,
-    index,
-    brightness: getColorBrightness(color),
-  }));
-  const sortedPaletteEntries = [...paletteEntries].sort((first, second) => {
-    const brightnessDifference = first.brightness - second.brightness;
+  commitSpriteMutation(sprite, () => {
+    const paletteEntries = sprite.palette.map((color, index) => ({
+      color,
+      index,
+      brightness: getColorBrightness(color),
+    }));
+    const sortedPaletteEntries = [...paletteEntries].sort((first, second) => {
+      const brightnessDifference = first.brightness - second.brightness;
 
-    return brightnessDifference === 0 ? first.index - second.index : brightnessDifference;
+      return brightnessDifference === 0 ? first.index - second.index : brightnessDifference;
+    });
+    const newIndexByOldIndex = new Map<number, number>();
+
+    sortedPaletteEntries.forEach(({ index }, newIndex) => {
+      newIndexByOldIndex.set(index, newIndex);
+    });
+
+    sprite.palette = sortedPaletteEntries.map(({ color }) => color);
+    sprite.indexes = sprite.indexes.map((index) => newIndexByOldIndex.get(index) ?? index);
   });
-  const newIndexByOldIndex = new Map<number, number>();
-
-  sortedPaletteEntries.forEach(({ index }, newIndex) => {
-    newIndexByOldIndex.set(index, newIndex);
-  });
-
-  sprite.palette = sortedPaletteEntries.map(({ color }) => color);
-  sprite.indexes = sprite.indexes.map((index) => newIndexByOldIndex.get(index) ?? index);
-  sprite.src = renderIndexedSpriteToDataUri(sprite.width, sprite.height, sprite.palette, sprite.indexes);
-  markSpriteAsDirty(sprite);
   closeSpriteContextMenu();
 }
 
@@ -3066,6 +3244,22 @@ function removeSprite(sprite: IndexedSprite): void {
 <template>
   <Toast />
   <main v-if="isDetachedSpriteContextMenu" class="detached-sprite-context-menu" @contextmenu.prevent>
+    <Button
+      type="button"
+      text
+      label="Undo"
+      class="sprite-context-menu-action"
+      :disabled="!detachedSpriteContextMenuCanUndo"
+      @click="sendDetachedSpriteContextMenuAction('undo')"
+    />
+    <Button
+      type="button"
+      text
+      label="Redo"
+      class="sprite-context-menu-action"
+      :disabled="!detachedSpriteContextMenuCanRedo"
+      @click="sendDetachedSpriteContextMenuAction('redo')"
+    />
     <Button
       type="button"
       text
@@ -3528,6 +3722,24 @@ function removeSprite(sprite: IndexedSprite): void {
         role="menu"
         @click.stop
       >
+        <Button
+          type="button"
+          role="menuitem"
+          text
+          label="Undo"
+          class="sprite-context-menu-action"
+          :disabled="!canUndoSprite(spriteContextMenu.sprite)"
+          @click="undoSprite(spriteContextMenu.sprite)"
+        />
+        <Button
+          type="button"
+          role="menuitem"
+          text
+          label="Redo"
+          class="sprite-context-menu-action"
+          :disabled="!canRedoSprite(spriteContextMenu.sprite)"
+          @click="redoSprite(spriteContextMenu.sprite)"
+        />
         <Button
           type="button"
           role="menuitem"
