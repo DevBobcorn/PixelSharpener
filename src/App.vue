@@ -2851,7 +2851,7 @@ function getDetachedSpriteContextMenuWidth(canSaveToSource: boolean): number {
     "Undo",
     "Redo",
     "Sort Palette by Brightness",
-    ...(canSaveToSource ? ["Save"] : []),
+    ...(canSaveToSource ? ["Save", "Reload"] : []),
     "Save as",
     "Save Palette",
     "Remove",
@@ -2967,6 +2967,11 @@ async function handleSpriteContextMenuAction(payload: SpriteContextMenuActionPay
 
   if (payload.action === "save") {
     await saveSpriteToSourcePath(sprite);
+    return;
+  }
+
+  if (payload.action === "reload") {
+    await reloadSpriteFromSourcePath(sprite);
     return;
   }
 
@@ -3100,6 +3105,60 @@ async function saveSpriteToSourcePath(sprite: IndexedSprite): Promise<void> {
   } catch (error) {
     showErrorToast("Save failed", error instanceof Error ? error.message : "Unable to save sprite.");
   }
+}
+
+async function reloadSpriteFromSourcePath(sprite: IndexedSprite): Promise<void> {
+  if (!canSaveSpriteToSource(sprite)) {
+    showWarningToast("Reload unavailable", "This sprite has no original import path to reload from.");
+    return;
+  }
+
+  const path = sprite.sourceFilePath!.trim();
+
+  try {
+    const reloadedSprite = await pathToIndexedSprite(path);
+    applyReloadedSpriteData(sprite, reloadedSprite);
+    markSpriteAsClean(sprite);
+
+    if (selectedSprite.value?.id === sprite.id) {
+      selectedSprite.value = sprite;
+      syncEditorPaletteSelection(sprite);
+    }
+
+    closeSpriteContextMenu();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unable to reload sprite.";
+    if (isSourceFileNotFoundError(message)) {
+      showErrorToast("File not found", `The file at "${path}" is no longer available.`);
+      return;
+    }
+
+    showErrorToast("Reload failed", message);
+  }
+}
+
+function applyReloadedSpriteData(target: IndexedSprite, source: IndexedSprite): void {
+  target.name = source.name;
+  target.sourceAction = source.sourceAction;
+  target.sourceFileName = source.sourceFileName;
+  target.sourceFilePath = source.sourceFilePath;
+  target.sourceFileDirty = false;
+  target.src = source.src;
+  target.width = source.width;
+  target.height = source.height;
+  target.palette = source.palette;
+  target.indexes = source.indexes;
+}
+
+function isSourceFileNotFoundError(message: string): boolean {
+  const normalized = message.toLowerCase();
+
+  return (
+    normalized.includes("no such file or directory") ||
+    normalized.includes("cannot find the file") ||
+    normalized.includes("system cannot find the path") ||
+    normalized.includes("os error 2")
+  );
 }
 
 async function saveSpritePaletteAsIndexedPng(sprite: IndexedSprite): Promise<void> {
@@ -3428,6 +3487,14 @@ function removeSprite(sprite: IndexedSprite): void {
       label="Save"
       class="sprite-context-menu-action"
       @click="sendDetachedSpriteContextMenuAction('save')"
+    />
+    <Button
+      v-if="detachedSpriteContextMenuCanSaveToSource"
+      type="button"
+      text
+      label="Reload"
+      class="sprite-context-menu-action"
+      @click="sendDetachedSpriteContextMenuAction('reload')"
     />
     <Button
       type="button"
@@ -3952,6 +4019,15 @@ function removeSprite(sprite: IndexedSprite): void {
           label="Save"
           class="sprite-context-menu-action"
           @click="saveSpriteToSourcePath(spriteContextMenu.sprite)"
+        />
+        <Button
+          v-if="canSaveSpriteToSource(spriteContextMenu.sprite)"
+          type="button"
+          role="menuitem"
+          text
+          label="Reload"
+          class="sprite-context-menu-action"
+          @click="reloadSpriteFromSourcePath(spriteContextMenu.sprite)"
         />
         <Button
           type="button"
