@@ -46,6 +46,12 @@ type SpriteSnapshot = {
   indexes: number[];
 };
 
+type SpriteHistoryTimelineEntry = {
+  timelineIndex: number;
+  kind: "undo" | "current" | "redo";
+  label: string;
+};
+
 type SpriteContextMenu = {
   sprite: IndexedSprite;
   x: number;
@@ -381,6 +387,36 @@ const sourceSelectionGridLines = computed<SourceSelectionGridLine[]>(() => {
       end: interpolatePosition(topRight, bottomRight, ratio),
     })),
   ];
+});
+const selectedSpriteHistoryCurrentIndex = computed(() => selectedSprite.value?.undoStack.length ?? -1);
+const selectedSpriteHistoryTimeline = computed<SpriteHistoryTimelineEntry[]>(() => {
+  const sprite = selectedSprite.value;
+  if (!sprite) {
+    return [];
+  }
+
+  const currentIndex = sprite.undoStack.length;
+  const entries: SpriteHistoryTimelineEntry[] = sprite.undoStack.map((_, timelineIndex) => ({
+    timelineIndex,
+    kind: "undo",
+    label: `Undo ${currentIndex - timelineIndex}`,
+  }));
+
+  entries.push({
+    timelineIndex: currentIndex,
+    kind: "current",
+    label: "Current",
+  });
+
+  [...sprite.redoStack].reverse().forEach((_, redoOffset) => {
+    entries.push({
+      timelineIndex: currentIndex + redoOffset + 1,
+      kind: "redo",
+      label: `Redo ${redoOffset + 1}`,
+    });
+  });
+
+  return entries;
 });
 
 onMounted(() => {
@@ -3088,28 +3124,65 @@ function canRedoSprite(sprite: IndexedSprite): boolean {
   return sprite.redoStack.length > 0;
 }
 
-function undoSprite(sprite: IndexedSprite): void {
+function undoSprite(sprite: IndexedSprite, options: { closeMenu?: boolean } = {}): boolean {
   const previous = sprite.undoStack.pop();
   if (!previous) {
-    return;
+    return false;
   }
 
   sprite.redoStack.push(createSpriteSnapshot(sprite));
   applySpriteSnapshot(sprite, previous);
   markSpriteAsDirty(sprite);
-  closeSpriteContextMenu();
+  if (options.closeMenu ?? true) {
+    closeSpriteContextMenu();
+  }
+
+  return true;
 }
 
-function redoSprite(sprite: IndexedSprite): void {
+function redoSprite(sprite: IndexedSprite, options: { closeMenu?: boolean } = {}): boolean {
   const next = sprite.redoStack.pop();
   if (!next) {
-    return;
+    return false;
   }
 
   sprite.undoStack.push(createSpriteSnapshot(sprite));
   applySpriteSnapshot(sprite, next);
   markSpriteAsDirty(sprite);
-  closeSpriteContextMenu();
+  if (options.closeMenu ?? true) {
+    closeSpriteContextMenu();
+  }
+
+  return true;
+}
+
+function jumpSelectedSpriteHistory(timelineIndex: number): void {
+  const sprite = selectedSprite.value;
+  if (!sprite) {
+    return;
+  }
+
+  jumpSpriteToTimelineIndex(sprite, timelineIndex);
+}
+
+function jumpSpriteToTimelineIndex(sprite: IndexedSprite, timelineIndex: number): void {
+  const totalEntries = sprite.undoStack.length + sprite.redoStack.length + 1;
+  if (totalEntries <= 0) {
+    return;
+  }
+
+  const targetIndex = clamp(timelineIndex, 0, totalEntries - 1);
+  while (sprite.undoStack.length > targetIndex) {
+    if (!undoSprite(sprite, { closeMenu: false })) {
+      break;
+    }
+  }
+
+  while (sprite.undoStack.length < targetIndex) {
+    if (!redoSprite(sprite, { closeMenu: false })) {
+      break;
+    }
+  }
 }
 
 function commitSpriteMutation(sprite: IndexedSprite, mutate: () => void): void {
@@ -3314,6 +3387,7 @@ function removeSprite(sprite: IndexedSprite): void {
           <Tab value="edit-sprite">Edit Sprite</Tab>
           <Tab value="update-palette">Update Palette</Tab>
           <Tab value="resize-palette">Resize Palette</Tab>
+          <Tab value="history">History</Tab>
         </TabList>
 
         <TabPanels>
@@ -3684,6 +3758,45 @@ function removeSprite(sprite: IndexedSprite): void {
                 </div>
                 <div v-else class="empty-tab palette-remap-empty">Select a sprite to resize palette</div>
               </Panel>
+            </section>
+          </TabPanel>
+
+          <TabPanel value="history">
+            <section class="history-layout">
+              <Panel header="History" class="palette-remap-panel">
+                <div v-if="selectedSprite" class="palette-remap-content">
+                  <ul class="history-stack-list" aria-label="Sprite undo and redo history">
+                    <li
+                      v-for="entry in selectedSpriteHistoryTimeline"
+                      :key="`${selectedSprite.id}-${entry.kind}-${entry.timelineIndex}`"
+                      class="history-stack-row"
+                    >
+                      <button
+                        type="button"
+                        class="history-stack-button"
+                        :class="{
+                          'is-current': selectedSpriteHistoryCurrentIndex === entry.timelineIndex,
+                          'is-undo': entry.kind === 'undo',
+                          'is-redo': entry.kind === 'redo',
+                        }"
+                        @click="jumpSelectedSpriteHistory(entry.timelineIndex)"
+                      >
+                        <span class="history-stack-label">{{ entry.label }}</span>
+                        <span class="history-stack-detail">#{{ entry.timelineIndex }}</span>
+                      </button>
+                    </li>
+                  </ul>
+                </div>
+                <div v-else class="empty-tab palette-remap-empty">Select a sprite to view history</div>
+              </Panel>
+
+              <SpriteViewer
+                :preview-src="selectedSprite?.src"
+                :palette="selectedSprite ? selectedSprite.palette.map((color) => ({ color: colorToCss(color), label: colorToHex(color) })) : []"
+                :indexes="selectedSprite?.indexes ?? []"
+                :width="selectedSprite?.width ?? 1"
+                :height="selectedSprite?.height ?? 1"
+              />
             </section>
           </TabPanel>
         </TabPanels>
