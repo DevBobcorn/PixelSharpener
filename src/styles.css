@@ -649,10 +649,19 @@ body {
   line-height: 0;
 }
 
+.sprite-preview-tiled-grid {
+  position: absolute;
+  inset: 0;
+}
+
 .sprite-preview-image {
   display: block;
   image-rendering: pixelated;
   user-select: none;
+}
+
+.sprite-preview-image-tiled {
+  position: absolute;
 }
 
 .sprite-pixel-hover-frame {
