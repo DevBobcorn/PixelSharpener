@@ -985,6 +985,10 @@ body {
   text-align: left;
 }
 
+.edit-palette-color-context-menu {
+  z-index: 12;
+}
+
 .sidebar-actions {
   display: grid;
   gap: 0.4rem;

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import Panel from "primevue/panel";
+import Button from "primevue/button";
 
 type PaletteSwatch = {
   color: string;
@@ -10,6 +11,11 @@ type PaletteSwatch = {
 type PaintPayload = {
   x: number;
   y: number;
+};
+
+type ShiftSelectionColorPayload = {
+  offsets: number[];
+  delta: number;
 };
 
 type SelectionMode = "replace" | "add" | "subtract";
@@ -29,6 +35,7 @@ const emit = defineEmits<{
   paintStart: [];
   paint: [payload: PaintPayload];
   paintEnd: [];
+  shiftSelectionColor: [payload: ShiftSelectionColorPayload];
 }>();
 
 const editorViewportElement = ref<HTMLElement | null>(null);
@@ -41,6 +48,7 @@ const selectionStartPixel = ref<{ x: number; y: number } | null>(null);
 const selectionCurrentPixel = ref<{ x: number; y: number } | null>(null);
 const selectionMode = ref<SelectionMode>("replace");
 const selectedPixelOffsets = ref(new Set<number>());
+const selectionContextMenu = ref<{ x: number; y: number } | null>(null);
 let resizeObserver: ResizeObserver | null = null;
 
 const previewScale = computed(() => {
@@ -199,6 +207,8 @@ onMounted(() => {
     };
   });
   resizeObserver.observe(editorViewportElement.value);
+  window.addEventListener("click", closeSelectionContextMenu);
+  window.addEventListener("keydown", closeSelectionContextMenuOnEscape);
   renderCanvas();
 });
 
@@ -209,6 +219,8 @@ onBeforeUnmount(() => {
   }
 
   resizeObserver?.disconnect();
+  window.removeEventListener("click", closeSelectionContextMenu);
+  window.removeEventListener("keydown", closeSelectionContextMenuOnEscape);
 });
 
 watch(
@@ -226,6 +238,7 @@ watch(
     selectionStartPixel.value = null;
     selectionCurrentPixel.value = null;
     isSelecting.value = false;
+    closeSelectionContextMenu();
     renderCanvas();
   },
 );
@@ -267,6 +280,8 @@ function renderCanvas(): void {
 }
 
 function startPaint(event: PointerEvent): void {
+  closeSelectionContextMenu();
+
   if (props.tool === "selection") {
     startSelection(event);
     return;
@@ -395,6 +410,55 @@ function stopSelection(event: PointerEvent): void {
   selectionCurrentPixel.value = null;
 }
 
+function handleSelectionContextMenu(event: MouseEvent): void {
+  event.preventDefault();
+  const selected = selectedPixelOffsets.value;
+  if (selected.size === 0) {
+    closeSelectionContextMenu();
+    return;
+  }
+
+  const position = getPixelFromClientPosition(event.clientX, event.clientY, false);
+  if (!position) {
+    closeSelectionContextMenu();
+    return;
+  }
+
+  const offset = position.y * props.width + position.x;
+  if (!selected.has(offset)) {
+    closeSelectionContextMenu();
+    return;
+  }
+
+  selectionContextMenu.value = {
+    x: event.clientX,
+    y: event.clientY,
+  };
+}
+
+function shiftSelectedColors(delta: number): void {
+  const offsets = Array.from(selectedPixelOffsets.value);
+  if (offsets.length === 0) {
+    return;
+  }
+
+  emit("shiftSelectionColor", {
+    offsets,
+    delta,
+  });
+  closeSelectionContextMenu();
+}
+
+function closeSelectionContextMenu(): void {
+  selectionContextMenu.value = null;
+}
+
+function closeSelectionContextMenuOnEscape(event: KeyboardEvent): void {
+  if (event.key === "Escape") {
+    closeSelectionContextMenu();
+  }
+}
+
 function getSelectionModeFromEvent(event: PointerEvent): SelectionMode {
   if (event.ctrlKey) {
     return "subtract";
@@ -440,8 +504,22 @@ function getPixelFromEvent(event: PointerEvent, clampToBounds = false): { x: num
     return null;
   }
 
-  const localX = event.clientX - bounds.left;
-  const localY = event.clientY - bounds.top;
+  return getPixelFromClientPosition(event.clientX, event.clientY, clampToBounds);
+}
+
+function getPixelFromClientPosition(clientX: number, clientY: number, clampToBounds = false): { x: number; y: number } | null {
+  const canvas = editorCanvasElement.value;
+  if (!canvas || props.width <= 0 || props.height <= 0) {
+    return null;
+  }
+
+  const bounds = canvas.getBoundingClientRect();
+  if (bounds.width === 0 || bounds.height === 0) {
+    return null;
+  }
+
+  const localX = clientX - bounds.left;
+  const localY = clientY - bounds.top;
   if (!clampToBounds && (localX < 0 || localY < 0 || localX >= bounds.width || localY >= bounds.height)) {
     return null;
   }
@@ -471,7 +549,7 @@ function clamp(value: number, minValue: number, maxValue: number): number {
         @pointerup="stopPaint"
         @pointercancel="stopPaint"
         @pointerleave="clearHoveredPixel"
-        @contextmenu.prevent
+        @contextmenu="handleSelectionContextMenu"
       >
         <div v-if="previewSrc" class="sprite-editor-canvas-content">
           <canvas
@@ -510,7 +588,36 @@ function clamp(value: number, minValue: number, maxValue: number): number {
             />
           </svg>
         </div>
-        <span v-else>Select a sprite to edit</span>
+        <span v-if="!previewSrc">Select a sprite to edit</span>
+        <div
+          v-if="selectionContextMenu"
+          class="sprite-context-menu sprite-selection-context-menu"
+          :style="{ left: `${selectionContextMenu.x}px`, top: `${selectionContextMenu.y}px` }"
+          role="menu"
+          @click.stop
+          @pointerdown.stop
+          @pointerup.stop
+          @contextmenu.prevent.stop
+        >
+          <Button
+            type="button"
+            role="menuitem"
+            text
+            label="Shift color by 1"
+            class="sprite-context-menu-action"
+            @pointerdown.stop
+            @click.stop="shiftSelectedColors(1)"
+          />
+          <Button
+            type="button"
+            role="menuitem"
+            text
+            label="Shift color by -1"
+            class="sprite-context-menu-action"
+            @pointerdown.stop
+            @click.stop="shiftSelectedColors(-1)"
+          />
+        </div>
       </section>
     </Panel>
   </section>

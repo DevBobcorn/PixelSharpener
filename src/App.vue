@@ -141,6 +141,11 @@ type SpriteEditorPaintPayload = {
   y: number;
 };
 
+type SpriteEditorShiftSelectionColorPayload = {
+  offsets: number[];
+  delta: number;
+};
+
 type SpriteContextMenuActionPayload = {
   action: SpriteContextMenuAction;
   spriteId: number;
@@ -193,6 +198,7 @@ const showResizePreview = ref(false);
 const mergeMethod = ref<MergeMethod>("by-distance");
 const resizeMergeMethod = ref<MergeMethod>("by-distance");
 const spriteContextMenu = ref<SpriteContextMenu | null>(null);
+const editPaletteColorContextMenu = ref<{ x: number; y: number; paletteIndex: number } | null>(null);
 const spriteTooltip = ref<SpriteTooltip | null>(null);
 const spriteFileDropActive = ref(false);
 const spriteFileDropDepth = ref(0);
@@ -995,6 +1001,16 @@ function handleEditSwatchPointerDown(event: PointerEvent, paletteIndex: number):
   setEditPaletteIndex(paletteIndex);
 }
 
+function openEditPaletteColorContextMenu(event: MouseEvent, paletteIndex: number): void {
+  event.preventDefault();
+  setEditPaletteIndex(paletteIndex);
+  editPaletteColorContextMenu.value = {
+    x: event.clientX,
+    y: event.clientY,
+    paletteIndex,
+  };
+}
+
 function editPaletteColor(index: number): void {
   const sprite = selectedSprite.value;
   if (!sprite) {
@@ -1071,6 +1087,50 @@ function addSpritePaletteColor(): void {
   }
 
   editForegroundPaletteIndex.value = newIndex;
+}
+
+function shiftSelectedSpriteColors(payload: SpriteEditorShiftSelectionColorPayload): void {
+  const sprite = selectedSprite.value;
+  if (!sprite || payload.offsets.length === 0 || payload.delta === 0 || sprite.palette.length === 0) {
+    return;
+  }
+
+  const maxPaletteIndex = sprite.palette.length - 1;
+  commitSpriteMutation(sprite, payload.delta > 0 ? "Shift Selection Color (+1)" : "Shift Selection Color (-1)", () => {
+    payload.offsets.forEach((offset) => {
+      const currentPaletteIndex = sprite.indexes[offset] ?? transparentPaletteIndex;
+      if (currentPaletteIndex === transparentPaletteIndex) {
+        return;
+      }
+
+      sprite.indexes[offset] = clamp(currentPaletteIndex + payload.delta, 0, maxPaletteIndex);
+    });
+  });
+}
+
+function removeSpritePaletteColor(index: number): void {
+  const sprite = selectedSprite.value;
+  if (!sprite || !sprite.palette[index]) {
+    return;
+  }
+
+  commitSpriteMutation(sprite, "Remove Palette Color", () => {
+    sprite.palette.splice(index, 1);
+    sprite.indexes = sprite.indexes.map((paletteIndex) => {
+      if (paletteIndex === transparentPaletteIndex) {
+        return transparentPaletteIndex;
+      }
+
+      if (paletteIndex === index) {
+        return transparentPaletteIndex;
+      }
+
+      return paletteIndex > index ? paletteIndex - 1 : paletteIndex;
+    });
+  });
+
+  syncEditorPaletteSelection(sprite);
+  editPaletteColorContextMenu.value = null;
 }
 
 function applySpriteEditorPaint(payload: SpriteEditorPaintPayload): void {
@@ -3001,6 +3061,7 @@ async function handleSpriteContextMenuAction(payload: SpriteContextMenuActionPay
 
 function closeSpriteContextMenu(): void {
   spriteContextMenu.value = null;
+  editPaletteColorContextMenu.value = null;
   void closeDetachedSpriteContextMenuWindow();
 }
 
@@ -3715,6 +3776,7 @@ function removeSprite(sprite: IndexedSprite): void {
                         :aria-label="swatch.label"
                         @pointerdown="handleEditSwatchPointerDown($event, swatch.value)"
                         @dblclick="editPaletteColor(swatch.value)"
+                        @contextmenu.prevent="openEditPaletteColorContextMenu($event, swatch.value)"
                       >
                         <span class="edit-palette-swatch-chip" :style="{ backgroundColor: swatch.color }" />
                         <span class="edit-palette-swatch-label">{{ swatch.label }}</span>
@@ -3740,6 +3802,7 @@ function removeSprite(sprite: IndexedSprite): void {
                 @paint-start="startSpriteEditStroke"
                 @paint="applySpriteEditorPaint"
                 @paint-end="endSpriteEditStroke"
+                @shift-selection-color="shiftSelectedSpriteColors"
               />
             </section>
           </TabPanel>
@@ -4081,6 +4144,22 @@ function removeSprite(sprite: IndexedSprite): void {
           label="Remove"
           class="sprite-context-menu-action"
           @click="removeSprite(spriteContextMenu.sprite)"
+        />
+      </div>
+      <div
+        v-if="editPaletteColorContextMenu"
+        class="sprite-context-menu edit-palette-color-context-menu"
+        :style="{ left: `${editPaletteColorContextMenu.x}px`, top: `${editPaletteColorContextMenu.y}px` }"
+        role="menu"
+        @click.stop
+      >
+        <Button
+          type="button"
+          role="menuitem"
+          text
+          label="Remove"
+          class="sprite-context-menu-action"
+          @click="removeSpritePaletteColor(editPaletteColorContextMenu.paletteIndex)"
         />
       </div>
       <div class="sidebar-actions">
