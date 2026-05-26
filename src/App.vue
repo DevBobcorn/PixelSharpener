@@ -208,8 +208,6 @@ const transparentPaletteIndex = -1;
 const spriteImageExtensions = new Set(["avif", "bmp", "gif", "jpeg", "jpg", "png", "webp"]);
 const spriteContextMenuWindowLabel = "sprite-context-menu";
 const spriteContextMenuWindowMinWidth = 192;
-const spriteContextMenuActionHeight = 24;
-const spriteContextMenuWindowVerticalPadding = 32;
 const spriteContextMenuWindowHorizontalPadding = 72;
 const pngSignature = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
 const crc32Table = createCrc32Table();
@@ -2846,8 +2844,17 @@ async function openDetachedSpriteContextMenu(event: MouseEvent, sprite: IndexedS
 }
 
 function getDetachedSpriteContextMenuHeight(canSaveToSource: boolean): number {
-  const actionCount = canSaveToSource ? 7 : 6;
-  return actionCount * spriteContextMenuActionHeight + spriteContextMenuWindowVerticalPadding;
+  const actionCount = canSaveToSource ? 8 : 6;
+  const rootFontSize = Number.parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+  const actionHeightRem = 1.7;
+  const menuGapRem = 0.125;
+  const menuPaddingRem = 0.125;
+  const menuSafetyPaddingPx = 8;
+  const actionsHeightPx = actionCount * actionHeightRem * rootFontSize;
+  const gapsHeightPx = Math.max(0, actionCount - 1) * menuGapRem * rootFontSize;
+  const menuPaddingPx = 2 * menuPaddingRem * rootFontSize;
+
+  return Math.ceil(actionsHeightPx + gapsHeightPx + menuPaddingPx + menuSafetyPaddingPx);
 }
 
 function getDetachedSpriteContextMenuWidth(canSaveToSource: boolean): number {
