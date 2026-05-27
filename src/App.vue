@@ -15,6 +15,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import brushToolIcon from "./assets/tool_icons/brush.svg";
+import eraserToolIcon from "./assets/tool_icons/eraser.svg";
+import pencilToolIcon from "./assets/tool_icons/pencil.svg";
+import selectionToolIcon from "./assets/tool_icons/selection.svg";
 import SpriteEditor from "./components/SpriteEditor.vue";
 import SpriteViewer from "./components/SpriteViewer.vue";
 
@@ -3742,15 +3746,23 @@ function removeSprite(sprite: IndexedSprite): void {
               <Panel header="Edit Tools" class="palette-remap-panel">
                 <div v-if="selectedSprite" class="palette-remap-content">
                   <div class="edit-tool-buttons">
-                    <Button type="button" label="Pencil" :severity="editTool === 'pencil' ? 'primary' : 'secondary'" @click="setEditTool('pencil')" />
-                    <Button type="button" label="Brush" :severity="editTool === 'brush' ? 'primary' : 'secondary'" @click="setEditTool('brush')" />
-                    <Button type="button" label="Eraser" :severity="editTool === 'eraser' ? 'primary' : 'secondary'" @click="setEditTool('eraser')" />
+                    <Button type="button" :severity="editTool === 'pencil' ? 'primary' : 'secondary'" aria-label="Pencil" @click="setEditTool('pencil')">
+                      <img :src="pencilToolIcon" alt="" class="edit-tool-icon" />
+                    </Button>
+                    <Button type="button" :severity="editTool === 'brush' ? 'primary' : 'secondary'" aria-label="Brush" @click="setEditTool('brush')">
+                      <img :src="brushToolIcon" alt="" class="edit-tool-icon" />
+                    </Button>
+                    <Button type="button" :severity="editTool === 'eraser' ? 'primary' : 'secondary'" aria-label="Eraser" @click="setEditTool('eraser')">
+                      <img :src="eraserToolIcon" alt="" class="edit-tool-icon" />
+                    </Button>
                     <Button
                       type="button"
-                      label="Selection"
                       :severity="editTool === 'selection' ? 'primary' : 'secondary'"
+                      aria-label="Selection"
                       @click="setEditTool('selection')"
-                    />
+                    >
+                      <img :src="selectionToolIcon" alt="" class="edit-tool-icon" />
+                    </Button>
                   </div>
 
                   <label v-if="editTool !== 'selection'" class="edit-radius-control">
@@ -3783,11 +3795,6 @@ function removeSprite(sprite: IndexedSprite): void {
                       </button>
                     </li>
                   </ul>
-
-                  <div class="edit-palette-preview-legend">
-                    <span class="edit-palette-legend-mark is-fg" aria-hidden="true" />
-                    <span>Foreground selection</span>
-                  </div>
                 </div>
                 <div v-else class="empty-tab palette-remap-empty">Select a sprite to edit</div>
               </Panel>
