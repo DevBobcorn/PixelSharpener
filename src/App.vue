@@ -198,6 +198,10 @@ const activeEditStrokeSpriteId = ref<number | null>(null);
 const paletteRemapTargets = ref<RgbaColor[]>([]);
 const dedupeRemappedColors = ref(true);
 const showRemapPreview = ref(false);
+const updatePaletteTab = ref<"color-mapping" | "color-approximation">("color-mapping");
+const approximationFileInput = ref<HTMLInputElement | null>(null);
+const approximationPaletteColors = ref<RgbaColor[]>([]);
+const showApproximationPreview = ref(false);
 const showResizePreview = ref(false);
 const mergeMethod = ref<MergeMethod>("by-distance");
 const resizeMergeMethod = ref<MergeMethod>("by-distance");
@@ -288,6 +292,10 @@ const canApplyPaletteRemap = computed(() => {
   const sprite = selectedSprite.value;
   return Boolean(sprite && paletteRemapTargets.value.length === sprite.palette.length);
 });
+const canApplyColorApproximation = computed(() => {
+  const sprite = selectedSprite.value;
+  return Boolean(sprite && approximationPaletteColors.value.length > 0);
+});
 const updatePalettePreview = computed<{
   src?: string;
   palette: RgbaColor[];
@@ -303,6 +311,27 @@ const updatePalettePreview = computed<{
       indexes: [],
       width: 1,
       height: 1,
+    };
+  }
+
+  if (updatePaletteTab.value === "color-approximation") {
+    if (!showApproximationPreview.value || approximationPaletteColors.value.length === 0) {
+      return {
+        src: sprite.src,
+        palette: sprite.palette,
+        indexes: sprite.indexes,
+        width: sprite.width,
+        height: sprite.height,
+      };
+    }
+
+    const { palette, indexes } = approximateSpritePalette(sprite, approximationPaletteColors.value);
+    return {
+      src: renderIndexedSpriteToDataUri(sprite.width, sprite.height, palette, indexes),
+      palette,
+      indexes,
+      width: sprite.width,
+      height: sprite.height,
     };
   }
 
@@ -1887,6 +1916,154 @@ function remapSpritePalette(
     palette: remappedPalette,
     indexes: remappedIndexes,
   };
+}
+
+function approximateSpritePalette(
+  sprite: IndexedSprite,
+  palette: RgbaColor[],
+): { palette: RgbaColor[]; indexes: number[] } {
+  if (palette.length === 0) {
+    return {
+      palette: sprite.palette.map(cloneColor),
+      indexes: [...sprite.indexes],
+    };
+  }
+
+  const indexes = sprite.indexes.map((paletteIndex) => {
+    if (paletteIndex === transparentPaletteIndex) {
+      return transparentPaletteIndex;
+    }
+
+    const color = sprite.palette[paletteIndex];
+    if (!color) {
+      return transparentPaletteIndex;
+    }
+
+    return findNearestPaletteIndex(palette, color);
+  });
+
+  return {
+    palette: palette.map(cloneColor),
+    indexes,
+  };
+}
+
+function loadApproximationPalette(): void {
+  const sprite = selectedSprite.value;
+  if (!sprite) {
+    showWarningToast("Sprite required", "Select a sprite before loading an approximation palette.");
+    return;
+  }
+
+  approximationFileInput.value?.click();
+}
+
+async function handleApproximationPaletteUpload(event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = "";
+
+  if (!file) {
+    return;
+  }
+
+  try {
+    const loadedColors = await extractApproximationPaletteFromImage(file);
+    approximationPaletteColors.value = loadedColors;
+    showApproximationPreview.value = false;
+
+    if (loadedColors.length === 0) {
+      showWarningToast("No colors found", "The uploaded palette image did not contain any opaque colors.");
+    } else if (loadedColors.length > 256) {
+      showWarningToast("Palette too large", `Loaded ${loadedColors.length} colors; only the first 256 can be exported.`);
+    }
+  } catch (error) {
+    showErrorToast("Load failed", error instanceof Error ? error.message : "Unable to load palette image.");
+  }
+}
+
+async function extractApproximationPaletteFromImage(file: File): Promise<RgbaColor[]> {
+  if (!file.type.startsWith("image/")) {
+    throw new Error(`${file.name} is not an image file.`);
+  }
+
+  const image = await loadImage(file);
+  const canvas = document.createElement("canvas");
+  canvas.width = image.naturalWidth;
+  canvas.height = image.naturalHeight;
+
+  if (canvas.width === 0 || canvas.height === 0) {
+    throw new Error(`${file.name} does not contain readable image dimensions.`);
+  }
+
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) {
+    throw new Error("Unable to read palette image pixels.");
+  }
+
+  context.drawImage(image, 0, 0);
+  const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+  const colors: RgbaColor[] = [];
+  const seen = new Set<string>();
+
+  for (let offset = 0; offset < pixels.length; offset += 4) {
+    if (pixels[offset + 3] < 128) {
+      continue;
+    }
+
+    const color: RgbaColor = {
+      red: pixels[offset],
+      green: pixels[offset + 1],
+      blue: pixels[offset + 2],
+      alpha: 255,
+    };
+    const key = colorToKey(color);
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    colors.push(color);
+  }
+
+  return colors;
+}
+
+function approximateSelectedSpritePalette(): void {
+  const sprite = selectedSprite.value;
+  if (!sprite || !canApplyColorApproximation.value) {
+    showWarningToast("Sprite required", "Select a sprite and load a palette before approximating colors.");
+    return;
+  }
+
+  const { palette, indexes } = approximateSpritePalette(sprite, approximationPaletteColors.value);
+  commitSpriteMutation(sprite, "Approximate Palette", () => {
+    sprite.palette = palette;
+    sprite.indexes = indexes;
+  });
+}
+
+function approximateSelectedSpritePaletteToNew(): void {
+  const sprite = selectedSprite.value;
+  if (!sprite || !canApplyColorApproximation.value) {
+    showWarningToast("Sprite required", "Select a sprite and load a palette before approximating colors.");
+    return;
+  }
+
+  const { palette, indexes } = approximateSpritePalette(sprite, approximationPaletteColors.value);
+  const approximatedSprite: IndexedSprite = {
+    ...sprite,
+    id: nextSpriteId++,
+    name: `${sprite.name} approximate`,
+    sourceAction: "Remapped",
+    palette,
+    indexes,
+    src: renderIndexedSpriteToDataUri(sprite.width, sprite.height, palette, indexes),
+    undoStack: [],
+    redoStack: [],
+  };
+  openedSprites.value.push(approximatedSprite);
+  selectedSprite.value = approximatedSprite;
 }
 
 function extractSpriteFromSource(): void {
@@ -3824,56 +4001,118 @@ function removeSprite(sprite: IndexedSprite): void {
                 :height="updatePalettePreview.height"
               />
 
-              <Panel header="Color Mapping" class="palette-remap-panel">
-                <div v-if="selectedSprite" class="palette-remap-content">
-                  <ul class="palette-remap-list" aria-label="Palette color remap list">
-                    <li v-for="row in paletteRemapRows" :key="row.index" class="palette-remap-row">
-                      <div class="palette-remap-color">
-                        <span class="palette-remap-swatch" :style="{ backgroundColor: colorToCss(row.sourceColor) }" />
-                        <span class="palette-remap-label">{{ row.index }}: {{ colorToHex(row.sourceColor) }}</span>
+              <div class="update-palette-mode-column">
+                <Tabs v-model:value="updatePaletteTab" class="update-palette-mode-tabs">
+                  <TabList>
+                    <Tab value="color-mapping">Color Mapping</Tab>
+                    <Tab value="color-approximation">Color Approximation</Tab>
+                  </TabList>
+                  <TabPanels>
+                    <TabPanel value="color-mapping">
+                      <div v-if="selectedSprite" class="palette-remap-content">
+                        <ul class="palette-remap-list" aria-label="Palette color remap list">
+                          <li v-for="row in paletteRemapRows" :key="row.index" class="palette-remap-row">
+                            <div class="palette-remap-color">
+                              <span class="palette-remap-swatch" :style="{ backgroundColor: colorToCss(row.sourceColor) }" />
+                              <span class="palette-remap-label">{{ row.index }}: {{ colorToHex(row.sourceColor) }}</span>
+                            </div>
+                            <span class="palette-remap-arrow" aria-hidden="true">→</span>
+                            <div class="palette-remap-target">
+                              <input
+                                type="color"
+                                class="palette-remap-input"
+                                :value="colorToHex(row.targetColor)"
+                                @input="handleRemapColorInput(row.index, $event)"
+                              />
+                              <span class="palette-remap-label">{{ colorToHex(row.targetColor) }}</span>
+                            </div>
+                          </li>
+                        </ul>
+                        <div class="palette-remap-controls">
+                          <input
+                            ref="paletteFileInput"
+                            type="file"
+                            class="visually-hidden"
+                            accept="image/*"
+                            @change="handlePaletteImageUpload"
+                          />
+                          <Button type="button" label="Load Palette" :disabled="!canApplyPaletteRemap" @click="loadPaletteImageForRemap" />
+                          <label class="palette-remap-toggle">
+                            <input v-model="showRemapPreview" type="checkbox" />
+                            <span>Preview</span>
+                          </label>
+                          <label class="palette-remap-toggle">
+                            <input v-model="dedupeRemappedColors" type="checkbox" />
+                            <span>Dedupe remapped colors</span>
+                          </label>
+                          <div class="palette-remap-actions">
+                            <Button type="button" label="Remap" :disabled="!canApplyPaletteRemap" @click="remapSelectedSpritePalette" />
+                            <Button
+                              type="button"
+                              label="Remap to New"
+                              :disabled="!canApplyPaletteRemap"
+                              @click="remapSelectedSpritePaletteToNew"
+                            />
+                          </div>
+                        </div>
                       </div>
-                      <span class="palette-remap-arrow" aria-hidden="true">→</span>
-                      <div class="palette-remap-target">
-                        <input
-                          type="color"
-                          class="palette-remap-input"
-                          :value="colorToHex(row.targetColor)"
-                          @input="handleRemapColorInput(row.index, $event)"
-                        />
-                        <span class="palette-remap-label">{{ colorToHex(row.targetColor) }}</span>
+                      <div v-else class="empty-tab palette-remap-empty">Select a sprite to update palette</div>
+                    </TabPanel>
+                    <TabPanel value="color-approximation">
+                      <div v-if="selectedSprite" class="palette-remap-content">
+                        <div class="palette-remap-controls">
+                          <input
+                            ref="approximationFileInput"
+                            type="file"
+                            class="visually-hidden"
+                            accept="image/*"
+                            @change="handleApproximationPaletteUpload"
+                          />
+                          <Button type="button" label="Load Palette" @click="loadApproximationPalette" />
+                        </div>
+                        <ul
+                          v-if="approximationPaletteColors.length > 0"
+                          class="palette-remap-list"
+                          aria-label="Uploaded approximation palette list"
+                        >
+                          <li
+                            v-for="(color, colorIndex) in approximationPaletteColors"
+                            :key="colorIndex"
+                            class="palette-remap-row"
+                          >
+                            <div class="palette-remap-color">
+                              <span class="palette-remap-swatch" :style="{ backgroundColor: colorToCss(color) }" />
+                              <span class="palette-remap-label">{{ colorIndex }}: {{ colorToHex(color) }}</span>
+                            </div>
+                          </li>
+                        </ul>
+                        <div v-else class="empty-tab palette-remap-empty">Load a palette image to approximate colors</div>
+                        <div class="palette-remap-controls">
+                          <label class="palette-remap-toggle">
+                            <input v-model="showApproximationPreview" type="checkbox" :disabled="!canApplyColorApproximation" />
+                            <span>Preview</span>
+                          </label>
+                          <div class="palette-remap-actions">
+                            <Button
+                              type="button"
+                              label="Approximate"
+                              :disabled="!canApplyColorApproximation"
+                              @click="approximateSelectedSpritePalette"
+                            />
+                            <Button
+                              type="button"
+                              label="Approximate to New"
+                              :disabled="!canApplyColorApproximation"
+                              @click="approximateSelectedSpritePaletteToNew"
+                            />
+                          </div>
+                        </div>
                       </div>
-                    </li>
-                  </ul>
-                  <div class="palette-remap-controls">
-                    <input
-                      ref="paletteFileInput"
-                      type="file"
-                      class="visually-hidden"
-                      accept="image/*"
-                      @change="handlePaletteImageUpload"
-                    />
-                    <Button type="button" label="Load Palette" :disabled="!canApplyPaletteRemap" @click="loadPaletteImageForRemap" />
-                    <label class="palette-remap-toggle">
-                      <input v-model="showRemapPreview" type="checkbox" />
-                      <span>Preview</span>
-                    </label>
-                    <label class="palette-remap-toggle">
-                      <input v-model="dedupeRemappedColors" type="checkbox" />
-                      <span>Dedupe remapped colors</span>
-                    </label>
-                    <div class="palette-remap-actions">
-                      <Button type="button" label="Remap" :disabled="!canApplyPaletteRemap" @click="remapSelectedSpritePalette" />
-                      <Button
-                        type="button"
-                        label="Remap to New"
-                        :disabled="!canApplyPaletteRemap"
-                        @click="remapSelectedSpritePaletteToNew"
-                      />
-                    </div>
-                  </div>
-                </div>
-                <div v-else class="empty-tab palette-remap-empty">Select a sprite to update palette</div>
-              </Panel>
+                      <div v-else class="empty-tab palette-remap-empty">Select a sprite to update palette</div>
+                    </TabPanel>
+                  </TabPanels>
+                </Tabs>
+              </div>
             </section>
           </TabPanel>
 

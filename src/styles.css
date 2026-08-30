@@ -119,6 +119,43 @@ body {
   min-width: 0;
 }
 
+.update-palette-mode-column {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+}
+
+.update-palette-mode-tabs {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  width: 100%;
+}
+
+.update-palette-mode-tabs .p-tablist {
+  flex: 0 0 auto;
+}
+
+.update-palette-mode-tabs .p-tabpanels {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  padding: 0;
+  background: transparent;
+}
+
+.update-palette-mode-tabs .p-tabpanel {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  padding: 0.75rem;
+  width: 100%;
+}
+
 .edit-sprite-layout {
   grid-template-columns: minmax(18rem, 1fr) minmax(24rem, 2fr);
 }
